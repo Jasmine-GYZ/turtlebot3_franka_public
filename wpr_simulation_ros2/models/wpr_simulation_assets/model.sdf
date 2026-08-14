@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<sdf version="1.7">
+  <model name="wpr_simulation_assets">
+    <static>true</static>
+    <link name="placeholder"/>
+  </model>
+</sdf>

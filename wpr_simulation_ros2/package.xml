@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd"
+             schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>wpr_simulation_ros2</name>
+  <version>0.1.0</version>
+  <description>Indoor scene resources for ROS 2 Humble and Gazebo Fortress.</description>
+
+  <maintainer email="zhangwanjie@6-robot.com">Zhang Wanjie</maintainer>
+  <license>GPL-3.0-only</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>rosgraph_msgs</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <gazebo_ros gazebo_model_path="${prefix}/models"/>
+  </export>
+</package>

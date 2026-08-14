@@ -1,0 +1,205 @@
+<?xml version="1.0"?>
+<!--
+Copied and modified from ros2 control demos example:
+https://github.com/ros-controls/ros2_control_demos/blob/foxy/ros2_control_demo_description/diffbot_description/ros2_control/diffbot_system.ros2_control.xacro
+https://github.com/ros-controls/ros2_control_demos/blob/foxy/ros2_control_demo_description/rrbot_description/ros2_control/rrbot_system_position_only.ros2_control.xacro
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="turtlebot3_manipulation_system" params="name prefix use_sim:=^|false use_fake_hardware:=^|false fake_sensor_commands:=^|false">
+
+    <ros2_control name="${name}" type="system">
+
+      <xacro:if value="$(arg use_sim)">
+        <hardware>
+          <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+        </hardware>
+      </xacro:if>
+      <xacro:unless value="$(arg use_sim)">
+        <hardware>
+          <xacro:if value="${use_fake_hardware}">
+            <plugin>fake_components/GenericSystem</plugin>
+            <param name="fake_sensor_commands">${fake_sensor_commands}</param>
+            <param name="state_following_offset">0.0</param>
+          </xacro:if>
+        </hardware>
+      </xacro:unless>
+
+      <joint name="${prefix}wheel_left_joint">
+        <command_interface name="velocity">
+          <param name="min">-24.5</param>
+          <param name="max">24.5</param>
+        </command_interface>
+        <state_interface name="position">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </joint>
+      <joint name="${prefix}wheel_right_joint">
+        <command_interface name="velocity">
+          <param name="min">-24.5</param>
+          <param name="max">24.5</param>
+        </command_interface>
+        <state_interface name="position">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </joint>
+
+      <sensor name="imu">
+        <state_interface name="orientation.x">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="orientation.y">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="orientation.z">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="orientation.w">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="angular_velocity.x">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="angular_velocity.y">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="angular_velocity.z">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="linear_acceleration.x">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="linear_acceleration.y">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="linear_acceleration.z">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </sensor>
+
+      <sensor name="battery">
+        <state_interface name="voltage">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="percentage">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="design_capacity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="present">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </sensor>
+
+      <!-- FR3 arm joints (7 DOF, position command, folded transport pose) -->
+      <joint name="fr3_joint1">
+        <command_interface name="position">
+          <param name="min">-2.9007</param>
+          <param name="max">2.9007</param>
+        </command_interface>
+        <state_interface name="position">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </joint>
+      <joint name="fr3_joint2">
+        <command_interface name="position">
+          <param name="min">-1.8361</param>
+          <param name="max">1.8361</param>
+        </command_interface>
+        <state_interface name="position">
+          <param name="initial_value">${-pi/4}</param>
+        </state_interface>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </joint>
+      <joint name="fr3_joint3">
+        <command_interface name="position">
+          <param name="min">-2.9007</param>
+          <param name="max">2.9007</param>
+        </command_interface>
+        <state_interface name="position">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </joint>
+      <joint name="fr3_joint4">
+        <command_interface name="position">
+          <param name="min">-3.0770</param>
+          <param name="max">-0.1169</param>
+        </command_interface>
+        <state_interface name="position">
+          <param name="initial_value">${-3*pi/4}</param>
+        </state_interface>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </joint>
+      <joint name="fr3_joint5">
+        <command_interface name="position">
+          <param name="min">-2.8763</param>
+          <param name="max">2.8763</param>
+        </command_interface>
+        <state_interface name="position">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </joint>
+      <joint name="fr3_joint6">
+        <command_interface name="position">
+          <param name="min">0.4398</param>
+          <param name="max">4.6216</param>
+        </command_interface>
+        <state_interface name="position">
+          <param name="initial_value">${pi/2}</param>
+        </state_interface>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </joint>
+      <joint name="fr3_joint7">
+        <command_interface name="position">
+          <param name="min">-3.0508</param>
+          <param name="max">3.0508</param>
+        </command_interface>
+        <state_interface name="position">
+          <param name="initial_value">${pi/4}</param>
+        </state_interface>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </joint>
+
+      <!-- FR3 finger (only joint1; joint2 is URDF mimic handled by Gazebo physics) -->
+      <joint name="fr3_finger_joint1">
+        <command_interface name="position">
+          <param name="min">0.0</param>
+          <param name="max">0.04</param>
+        </command_interface>
+        <state_interface name="position">
+          <param name="initial_value">0.04</param>
+        </state_interface>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </joint>
+
+    </ros2_control>
+
+  </xacro:macro>
+
+</robot>

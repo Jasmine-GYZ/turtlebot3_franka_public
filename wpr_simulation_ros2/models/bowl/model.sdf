@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="bowl">
+    <link name="link">
+      <inertial>
+        <!--
+          保留资源原有质量。惯性按视觉网格的轴对称包络近似计算：
+          半径 0.08066 m、高度 0.05501 m，质心位于高度中点。
+          这里不用低面数 collision 网格直接积分，因为其不对称离散会
+          产生约 20 mm 的虚假横向质心偏移，不符合碗的轴对称外形。
+        -->
+        <mass>1.131</mass>
+        <inertia>
+          <ixx>0.002124632</ixx>
+          <ixy>0.0</ixy>
+          <ixz>0.0</ixz>
+          <iyy>0.002124632</iyy>
+          <iyz>0.0</iyz>
+          <izz>0.003678865</izz>
+        </inertia>
+        <pose>0 0 0.0275045 0 0 0</pose>
+      </inertial>
+      <collision name="collision">
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://bowl/meshes/collision.dae</uri>
+          </mesh>
+        </geometry>
+      </collision>
+      <visual name="visual">
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://bowl/meshes/textured.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+  </model>
+</sdf>

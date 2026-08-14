@@ -1,0 +1,17 @@
+# colcon / ROS 构建产物
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# 日志 / 临时文件
+*.log
+*.gv

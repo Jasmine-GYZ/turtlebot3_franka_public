@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="pudding_box">
+    <link name="link">
+      <inertial>
+        <mass>0.187</mass>
+        <inertia>
+          <ixx>0.000142525</ixx> <!-- 1/12*0.187*(0.089^2+0.035^2) -->
+          <ixy>0.0</ixy>
+          <ixz>0.0</ixz>
+          <iyy>0.000207648</iyy> <!-- 1/12*0.187*(0.110^2+0.035^2) -->
+          <iyz>0.0</iyz>
+          <izz>0.000311994</izz> <!-- 1/12*0.187*(0.110^2+0.089^2) -->
+        </inertia>
+        <pose>0 0 0.0175 0 0 0</pose>
+      </inertial>
+      <collision name="collision">
+        <pose>0 0 0.0175 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.110 0.089 0.035</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="visual">
+        <!--
+          DAE 的厚度轴是 Y，而 collision 的厚度轴是 Z。先绕 X
+          轴旋转 90° 使三边对应，再对齐两者包围盒中心。
+        -->
+        <pose>0.000264585 0.044871683 0.016779020 1.570796327 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://pudding_box/meshes/textured.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+  </model>
+</sdf>
