@@ -9,7 +9,7 @@ TurtleBot3 Waffle Pi + FR3 机械臂在 **Gazebo Fortress (Ignition Gazebo)** �
 |---|---|
 | `franka_description` | FR3 机械臂 URDF/meshes（tag 2.8.1），仿真 URDF 的硬依赖 |
 | `turtlebot3_manipulation_gazebo` | 仿真 spawn 启动（`turtlebot3_franka.launch.py`）、TB3+FR3 URDF、ros2_control 配置、网格 |
-| `turtlebot3_manipulation_navigation2` | Nav2 启动（`navigation.launch.py`）、地图/参数、任务节点 `patrol_task.py`、cmd_vel 桥接 |
+| `turtlebot3_manipulation_navigation2` | Nav2 启动（`navigation.launch.py`）、地图/参数、任务节点 `patrol_task.py`、视觉识别流水线 `vision_pipeline.py`、cmd_vel 桥接 |
 | `wpr_simulation_ros2` | 仿真场景资源（`worlds/example.world` + `models/`） |
 | `docs/` | 两份说明文档（见下） |
 
@@ -19,7 +19,7 @@ TurtleBot3 Waffle Pi + FR3 机械臂在 **Gazebo Fortress (Ignition Gazebo)** �
 .
 ├── franka_description/                 # FR3 机械臂 URDF/meshes（依赖）
 ├── turtlebot3_manipulation_gazebo/     # 仿真包
-├── turtlebot3_manipulation_navigation2/  # 导航 + 任务包
+├── turtlebot3_manipulation_navigation2/  # 导航 + 任务 + 视觉识别包
 ├── wpr_simulation_ros2/                # 仿真场景包
 ├── docs/
 │   ├── turtlebot3-fr3-fortress-integration.md  # TB3+FR3 集成细节（含改动清单）
@@ -43,6 +43,39 @@ TurtleBot3 Waffle Pi + FR3 机械臂在 **Gazebo Fortress (Ignition Gazebo)** �
 | `rviz2` | `sudo apt install ros-humble-rviz2` |
 
 > `franka_description` 已打包在本仓库里，无需再单独 clone。
+
+## 视觉识别（GroundingDINO + SAM2）
+
+巡逻节点到达观察点后调用 `vision_pipeline.py` 做开放集检测 + 实例分割：
+
+```
+相机帧 → GroundingDINO 检测（三类物品 prompt）→ NMS + 置信度过滤
+       → SAM2 框提示分割 → 掩码像素中心 + 深度反投影 → /map 3D 坐标
+       → 三类物品计数 + RViz Marker 标记
+```
+
+### 依赖
+
+- **GroundingDINO / SAM2 源码**：已复制到本仓库 `src/GroundingDINO`、`src/sam2`，无需再 clone。
+- **模型权重**（放在仓库外）：
+  - `/home/jasmine/model_weights/groundingdino/groundingdino_swint_ogc.pth`
+  - `/home/jasmine/model_weights/sam2/sam2_hiera_small.pt`
+- **Python 虚拟环境**：`/home/jasmine/vision_env`（同时装有 torch、groundingdino、sam2、supervision、hydra 以及 rclpy/sensor_msgs）。
+  运行任务节点前必须先 `source /home/jasmine/vision_env/bin/activate`。
+
+### 关键说明
+
+- 相机 RGB 话题：`/camera/image_raw`，深度 `/camera/depth/image_raw`，内参 `/camera/camera_info`。
+- 待计数物品 / 阈值在 `vision_pipeline.py` 顶部配置区（`ITEM_NAMES`、`BOX_THRESHOLD` 等）。
+- 三种物品（`apple` / `coke can` / `bowl`）计数结果：扫描完成后在终端打印，同时累计在 `item_counts`。
+- 识别到的物品在 RViz 的 `/map` 坐标系下以 `visualization_msgs/Marker`（话题 `/detected_items`）标记；
+  位置由「像素中心 + 对齐深度反投影 + TF 相机光学帧→map」解算得到。
+- 相邻观察点可能扫到同一物体（或把远处物体认错），按 `/map` 坐标去重（`DEDUP_DIST` 阈值），
+  同一位置只计一次、只标一个 Marker，以**首次登记**为准（后续重复检测直接丢弃）。
+- 单个观察点内同一物体不会被框两次：GroundingDINO 输出的框先 NMS，再按**框中心距离**合并
+  同一物体的重复框（只留得分最高者）。
+- 空桌不框选：低于桌面高度（`MIN_OBJECT_Z=0.70m`，/map z）的检测判为桌腿/地面等结构，直接丢弃。
+- 识别结果（数量 + 每个目标像素中心 + /map 3D 位置）汇总在 `detection_results`，标注图存到 `~/turtlebot3_detections/`。
 
 ## 构建
 
@@ -74,14 +107,15 @@ ros2 launch turtlebot3_manipulation_gazebo turtlebot3_franka.launch.py
 ros2 launch turtlebot3_manipulation_navigation2 navigation.launch.py
 ```
 
-**终端 3 — 任务节点（初始定位 → 串行巡逻）**
+**终端 3 — 任务节点（初始定位 → 串行巡逻 + 视觉识别）**
 
 ```bash
+source /home/jasmine/vision_env/bin/activate   # 视觉识别依赖环境（必须先激活）
 ros2 run turtlebot3_manipulation_navigation2 patrol_task.py
 ```
 
 任务节点会依次导航到 4 个客厅观察点（顺序 `table_3 → table_1 → table_0 → table_2`），
-到达后站稳扫描，再移动到下一个。详见 `docs/task-navigation.md`。
+到达后站稳识别（GroundingDINO + SAM2），再移动到下一个。详见 `docs/task-navigation.md`。
 
 ## 文档说明
 

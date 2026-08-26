@@ -41,14 +41,26 @@ WAYPOINTS = [
 - 因此 map 帧 = Gazebo world 帧，世界坐标可直接当 map 帧坐标发布，无需转换。
 
 ## 任务流程
-到达点位 → 站稳 → 视觉识别扫描（`_do_detection`，目前是 stub）→ 扫描完成才移动到下一点位。串行执行。
+到达点位 → 站稳 → 视觉识别（`_do_detection`）→ 识别完成才移动到下一点位。串行执行。
 
-## 视觉识别（占位符，待实现）
+## 视觉识别（GroundingDINO + SAM2）
 
-`_do_detection()` 目前是**占位符（stub）**：
+`_do_detection()` 已接入真实视觉流水线 `vision_pipeline.py`：
 
-- 只执行 `time.sleep(2.0)`，然后打印 `🔍 扫描中...` 和 `✓ 扫描完成`，**没有真正拍照/识别**。
-- `detection_results` 一直是空 `{}`（最后 `_all_done()` 会把它打印出来）。
+1. 订阅相机话题 `/camera/image_raw`，缓存最新一帧（另有深度 `/camera/depth/image_raw`、内参 `/camera/camera_info`）。
+2. GroundingDINO 检测（三类物品 prompt，`ITEM_NAMES`）→ NMS + 置信度过滤 → SAM2 框提示分割。
+3. 计算每个实例掩码的像素中心点，归类到三种物品之一（`classify_phrase`）。
+4. 像素中心 + 对齐深度反投影 + TF（相机光学帧→map）解算出 `/map` 帧 3D 坐标。
+5. 三类物品计数写入 `item_counts`，并在 RViz 的 `/map` 下以 Marker（话题 `/detected_items`）标记位置。
+6. 扫描全部完成后，在终端打印三种物品英文名称与数量。
+7. 可选保存标注图到 `~/turtlebot3_detections/`。
 
-后续实现：把 `sleep` 换成真正的「订阅图像 → 检测 → 去重计数」逻辑，
-并把结果写入 `detection_results`。图像处理节点之后再写。
+注意事项：
+
+- 模型（GroundingDINO + SAM2）在**首次识别时**加载，第一个观察点会额外花几十秒。
+- 必须用 `/home/jasmine/vision_env` 环境跑节点（同时含 torch/groundingdino/sam2 与 rclpy）。
+- 刻意不用 cv_bridge（当前环境 numpy 2.x 与 ROS 的 cv_bridge ABI 不兼容），图像解码用手动 numpy。
+- 相机光学帧：Gazebo 给相机帧加 `turtlebot3/` 前缀，启动文件已用 `override_frame_id: camera_rgb_optical_frame` 覆盖，与 TF 树对齐。
+- 去重：相邻观察点可能扫到同一物体（或把远处物体认错），按 `/map` 坐标距离合并（`DEDUP_DIST=0.25m`），同一位置只计一次、只标一个 Marker（首次登记为准）。
+- 单个观察点内：先 NMS，再按框中心距离合并同一物体的重复框（只留得分最高者），同一物体不会框两个框。
+- 空桌不框选：低于桌面高度（`MIN_OBJECT_Z=0.70m`，/map z）的检测判为误检丢弃。

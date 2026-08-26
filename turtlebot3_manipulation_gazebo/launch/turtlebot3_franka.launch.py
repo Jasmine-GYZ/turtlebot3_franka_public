@@ -168,6 +168,10 @@ def generate_launch_description():
         name="camera_bridge",
         arguments=[f"{image_topic}@sensor_msgs/msg/Image[gz.msgs.Image"],
         remappings=[(image_topic, "/camera/image_raw")],
+        # 与 lidar 同理：Gazebo 给相机帧加 "turtlebot3/" 前缀，而 TF 树里是
+        # 未加前缀的 camera_rgb_optical_frame，必须强制覆盖，否则 3D 定位的
+        # TF 查询会失败。RGB/depth/camera_info 三者共用同一光学帧。
+        parameters=[{"override_frame_id": "camera_rgb_optical_frame"}],
         output="screen",
     )
     depth_bridge = Node(
@@ -175,6 +179,7 @@ def generate_launch_description():
         name="depth_bridge",
         arguments=[f"{depth_topic}@sensor_msgs/msg/Image[gz.msgs.Image"],
         remappings=[(depth_topic, "/camera/depth/image_raw")],
+        parameters=[{"override_frame_id": "camera_rgb_optical_frame"}],
         output="screen",
     )
     camera_info_bridge = Node(
@@ -182,6 +187,7 @@ def generate_launch_description():
         name="camera_info_bridge",
         arguments=[f"{camera_info_topic}@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo"],
         remappings=[(camera_info_topic, "/camera/camera_info")],
+        parameters=[{"override_frame_id": "camera_rgb_optical_frame"}],
         output="screen",
     )
 
