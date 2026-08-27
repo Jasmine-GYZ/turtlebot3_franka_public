@@ -121,3 +121,8 @@ ros2 run turtlebot3_manipulation_navigation2 patrol_task.py
 
 - `docs/turtlebot3-fr3-fortress-integration.md` — TB3+FR3 在 Fortress 的集成改动清单、控制器/传感器验证结果、转运姿态关节值。
 - `docs/task-navigation.md` — 任务节点的初始位姿、访问顺序、串行导航流程、地图坐标系约定。
+
+pkill -9 -f 'ign gazebo'
+pkill -9 -f parameter_bridge
+pkill -9 -f robot_state_publisher
+pkill -9 -f ros_gz_bridge
