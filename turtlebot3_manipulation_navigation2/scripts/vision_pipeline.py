@@ -53,14 +53,15 @@ GDINO_CKPT = "/home/jasmine/model_weights/groundingdino/groundingdino_swint_ogc.
 SAM2_CKPT = "/home/jasmine/model_weights/sam2/sam2_hiera_small.pt"
 SAM2_CONFIG_NAME = "sam2_hiera_s.yaml"
 
-# 三种待计数物品（英文名）。GroundingDINO 的 caption 用 " . " 分隔多个文本查询，
+# 待计数物品（英文名）。GroundingDINO 的 caption 用 " . " 分隔多个文本查询，
 # 每个框返回的 phrase 就是命中的那一个查询文本。
-ITEM_NAMES = ["apple", "coke can", "bowl"]
-# 每种物品的别名（用于把检测到的 phrase 归一到三类之一）。
+ITEM_NAMES = ["apple", "coke can", "bowl", "banana"]
+# 每种物品的别名（用于把检测到的 phrase 归一到待计数物品之一）。
 ITEM_ALIASES = {
-    "apple": ["apple"],
+    "apple": ["apple", "red round apple"],
     "coke can": ["coke", "can", "coca", "cola", "soda"],
     "bowl": ["bowl"],
+    "banana": ["banana"],
 }
 TEXT_PROMPT = " . ".join(ITEM_NAMES) + " ."
 

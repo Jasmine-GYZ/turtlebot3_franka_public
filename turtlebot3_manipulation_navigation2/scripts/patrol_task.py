@@ -51,10 +51,10 @@ INITIAL_YAW = 0.0
 # 距离桌面约 1.2m，相机面向桌子长边
 # 访问顺序按 Gazebo 实际布局：table_3 → table_1 → table_0 → table_2
 WAYPOINTS = [
-    ("table_3", -4.7, -3.1, 0.0),           # 面朝 +X（living_room_table_3）
+    ("table_3", -4.95, -3.1, math.pi / 50),           # 面朝 +X（living_room_table_3）
     ("table_1", -3.3, -1.2, - math.pi / 2), # 面朝 -Y（living_room_table_1）
-    ("table_0", -2.1, -1.2, math.pi / 2),   # 面朝 +Y（living_room_table_0）
-    ("table_2", -0.4, -2.6, 0.0),           # 面朝 +X（living_room_table_2）
+    ("table_0", -2.1, -1.2, math.pi*7 / 12),   # 面朝 +Y（living_room_table_0）
+    ("table_2", -0.48, -2.6, math.pi / 25),           # 面朝 +X（living_room_table_2）
 ]
 
 # 相机 RGB 话题：Gazebo 桥接把 /pi_camera/image 重映射成了 /camera/image_raw，
@@ -65,12 +65,13 @@ CAMERA_IMAGE_TOPIC = "/camera/image_raw"
 DEPTH_IMAGE_TOPIC = "/camera/depth/image_raw"
 CAMERA_INFO_TOPIC = "/camera/camera_info"
 
-# RViz Marker 话题与三类物品颜色
+# RViz Marker 话题与各物品颜色
 MARKER_TOPIC = "/detected_items"
 ITEM_COLORS = {
     "apple": (1.0, 0.0, 0.0),      # 红
     "coke can": (0.0, 0.4, 1.0),   # 蓝
     "bowl": (0.0, 1.0, 0.0),       # 绿
+    "banana": (1.0, 1.0, 0.0),     # 黄
 }
 
 # 同一物理物品的 /map 坐标去重阈值（米）。不同物品在同一桌上相距 ≥0.3m，
@@ -567,7 +568,7 @@ class CompetitionTask(Node):
                 "dup": not is_new,
             })
 
-            # 计数（只有归到三类之一且是新物体才算）
+            # 计数（只有归到 ITEM_NAMES 之一且是新物体才算）
             if name is not None and is_new:
                 self._item_counts[name] = self._item_counts.get(name, 0) + 1
                 wp_counts[name] += 1
@@ -622,8 +623,8 @@ class CompetitionTask(Node):
         self.get_logger().info("检测结果: {}".format(self.detection_results))
         self.get_logger().info("=" * 45)
 
-        # 终端打印三种待计数物品的英文名称与数量
-        print("\n===== 计数结果（三种待计数物品）=====", flush=True)
+        # 终端打印各待计数物品的英文名称与数量
+        print("\n===== 计数结果（待计数物品）=====", flush=True)
         for name in vision_pipeline.ITEM_NAMES:
             print("  {}: {}".format(name, self._item_counts.get(name, 0)), flush=True)
         print("====================================\n", flush=True)

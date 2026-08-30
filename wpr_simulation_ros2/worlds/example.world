@@ -1266,6 +1266,32 @@
         </visual>
       </link>
     </model>
+    <!-- 地面上一个白色正方体小块 -->
+    <model name="white_block">
+      <static>true</static>
+      <pose>-2.7 -1.2 0.1 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.2 0.2 0.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.2 0.2 0.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>1 1 1 1</ambient>
+            <diffuse>1 1 1 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
     <!--
       可抓/可动物体：通过 include 引用包内 model.sdf，避免与资源定义双份维护。
       name 仅为 Gazebo 仿真侧实例标识；机器人侧不会收到模型名或几何。
@@ -1281,6 +1307,11 @@
       <pose>-3.47568 -3.40265 0.78 -0.005582 0.006263 -0.003267</pose>
     </include>
     <include>
+      <uri>model://apple</uri>
+      <name>apple_clone_2</name>
+      <pose>0.63 -2.6 0.78 0 0 0</pose>
+    </include>
+    <include>
       <uri>model://coke_can</uri>
       <name>coke_can</name>
       <pose>-2.35337 -0.061656 0.78 0 0 0</pose>
@@ -1289,6 +1320,21 @@
       <uri>model://bowl</uri>
       <name>bowl</name>
       <pose>2.6716 2.015 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://banana</uri>
+      <name>banana</name>
+      <pose>-3.3 -2.1 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://coke_can</uri>
+      <name>coke_can_1</name>
+      <pose>-3.5 -3.1 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://bowl</uri>
+      <name>bowl_1</name>
+      <pose>-3.5 -2.8 0.78 0 0 0</pose>
     </include>
   </world>
 </sdf>
