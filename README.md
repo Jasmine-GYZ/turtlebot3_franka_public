@@ -44,30 +44,43 @@ TurtleBot3 Waffle Pi + FR3 机械臂在 **Gazebo Fortress (Ignition Gazebo)** �
 
 > `franka_description` 已打包在本仓库里，无需再单独 clone。
 
-## 视觉识别（GroundingDINO + SAM2）
+## 视觉识别（GroundingDINO + INSID3 复核 + SAM2）
 
-巡逻节点到达观察点后调用 `vision_pipeline.py` 做开放集检测 + 实例分割：
+巡逻节点到达观察点后调用 `vision_pipeline.py` 做开放集检测 + 闭集复核 + 实例分割：
 
 ```
-相机帧 → GroundingDINO 检测（三类物品 prompt）→ NMS + 置信度过滤
+相机帧 → GroundingDINO 检测（原始 logits 逐框 argmax 取单一标签，消除多标签拼接）
+       → NMS + 置信度过滤
+       → INSID3 闭集复核（冻结 DINOv3 骨干，剔除干扰物 / 修正误判标签）
        → SAM2 框提示分割 → 掩码像素中心 + 深度反投影 → /map 3D 坐标
-       → 三类物品计数 + RViz Marker 标记
+       → 目标物品计数 + RViz Marker 标记
 ```
 
 ### 依赖
 
 - **GroundingDINO / SAM2 源码**：已复制到本仓库 `src/GroundingDINO`、`src/sam2`，无需再 clone。
-- **模型权重**（放在仓库外）：
-  - `/home/jasmine/model_weights/groundingdino/groundingdino_swint_ogc.pth`
-  - `/home/jasmine/model_weights/sam2/sam2_hiera_small.pt`
-- **Python 虚拟环境**：`/home/jasmine/vision_env`（同时装有 torch、groundingdino、sam2、supervision、hydra 以及 rclpy/sensor_msgs）。
+- **INSID3 / dinov3 源码**：已复制到工作区 `src/INSID3`、`src/dinov3`（`insid3_review.py` 惰性 import，无需再 clone）。
+- **模型权重**：
+  - GroundingDINO / SAM2（放在仓库外）：
+    - `/home/jasmine/model_weights/groundingdino/groundingdino_swint_ogc.pth`
+    - `/home/jasmine/model_weights/sam2/sam2_hiera_small.pt`
+  - INSID3 用 DINOv3 base 骨干（约 342MB，放在仓库内 `scripts/checkpoints/`）：
+    - `turtlebot3_manipulation_navigation2/scripts/checkpoints/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth`
+- **INSID3 参考图**：`turtlebot3_manipulation_navigation2/scripts/reference_views/` 下 18 类物体、
+  每类 6 视角（前/后/左/右/上/下）的 Gazebo 渲染截图，用作闭集复核的类别原型。
+- **Python 虚拟环境**：`/home/jasmine/vision_env`（同时装有 torch、groundingdino、sam2、supervision、hydra、
+  以及 INSID3 依赖 einops / scikit-learn、rclpy/sensor_msgs）。
   运行任务节点前必须先 `source /home/jasmine/vision_env/bin/activate`。
 
 ### 关键说明
 
 - 相机 RGB 话题：`/camera/image_raw`，深度 `/camera/depth/image_raw`，内参 `/camera/camera_info`。
 - 待计数物品 / 阈值在 `vision_pipeline.py` 顶部配置区（`ITEM_NAMES`、`BOX_THRESHOLD` 等）。
-- 三种物品（`apple` / `coke can` / `bowl`）计数结果：扫描完成后在终端打印，同时累计在 `item_counts`。
+- 闭集复核在 `insid3_review.py`：用冻结的 INSID3（DINOv3 骨干 + 位置偏置去相关，Train-Free 只推理零训练）
+  对每个候选框 crop 与各类参考原型做余弦相似度 argmax；命中目标类则保留并修正标签，命中干扰类或低置信则丢弃。
+  类别集合与参考图路径集中在文件顶部 `INSID3_CLASSES` / `REF_MODELS_ROOT` 配置区；权重缺失时
+  `vision_pipeline.py` 会捕获异常并降级为「无复核」继续运行。
+- 四种物品（`apple` / `coke can` / `bowl` / `banana`）计数结果：扫描完成后在终端打印，同时累计在 `item_counts`。
 - 识别到的物品在 RViz 的 `/map` 坐标系下以 `visualization_msgs/Marker`（话题 `/detected_items`）标记；
   位置由「像素中心 + 对齐深度反投影 + TF 相机光学帧→map」解算得到。
 - 相邻观察点可能扫到同一物体（或把远处物体认错），按 `/map` 坐标去重（`DEDUP_DIST` 阈值），

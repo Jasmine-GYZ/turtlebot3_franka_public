@@ -96,7 +96,7 @@ class VisionPipeline:
 
         # 重型导入延迟到此处
         from torchvision.ops import nms, box_convert
-        from groundingdino.util.inference import load_model, predict, Model
+        from groundingdino.util.inference import load_model, Model
         from sam2.build_sam import build_sam2
         from sam2.sam2_image_predictor import SAM2ImagePredictor
 
@@ -104,7 +104,6 @@ class VisionPipeline:
         self.text_prompt = text_prompt or TEXT_PROMPT
         self._nms = nms
         self._box_convert = box_convert
-        self._gdino_predict = predict
         self._preprocess = Model.preprocess_image
 
         print("===== 加载 SAM2（{}）=====".format(SAM2_CONFIG_NAME), flush=True)
@@ -113,8 +112,27 @@ class VisionPipeline:
         print("✅ SAM2 加载完成", flush=True)
 
         print("===== 加载 GroundingDINO =====", flush=True)
-        self.gdino_model = load_model(GDINO_CONFIG, GDINO_CKPT, device=self.device)
+        # load_model 只加载权重不搬设备（原 predict() 内部才 .to(device)），
+        # 这里改直接前向后须自己把模型搬到 device。
+        self.gdino_model = load_model(GDINO_CONFIG, GDINO_CKPT, device=self.device).to(self.device)
         print("✅ GroundingDINO 加载完成", flush=True)
+
+        # 缓存 caption 分词结果（逐框 argmax 映射短语用，与模型内部 tokenizer 一致）。
+        tokenized = self.gdino_model.tokenizer(
+            [self.text_prompt], padding="longest", return_tensors="pt")
+        self._input_ids = tokenized["input_ids"][0].tolist()
+
+        # INSID3 闭集复核（可选）：权重缺失 / 依赖缺失时降级为「无复核」，
+        # 仍能产出 GroundingDINO(argmax)+SAM2 结果，不阻塞巡逻。
+        self.reviewer = None
+        try:
+            from insid3_review import Insid3Reviewer
+            print("===== 加载 INSID3 闭集复核器（Train-Free，冻结骨干）=====", flush=True)
+            self.reviewer = Insid3Reviewer(device=self.device)
+            print("✅ INSID3 复核器加载完成", flush=True)
+        except Exception as e:
+            print("⚠️ INSID3 复核器加载失败，降级为无复核: {}".format(e), flush=True)
+            self.reviewer = None
 
     # ── 主流程 ───────────────────────────────────────────────
 
@@ -129,16 +147,31 @@ class VisionPipeline:
             center_px: (cx, cy) 掩码质心（像素）
             area     : int  掩码面积（像素数）
         """
+        import torch
+
         image_transformed = self._preprocess(img_bgr).to(self.device)
 
-        boxes, logits, phrases = self._gdino_predict(
-            model=self.gdino_model,
-            image=image_transformed,
-            caption=self.text_prompt,
-            box_threshold=BOX_THRESHOLD,
-            text_threshold=TEXT_THRESHOLD,
-            device=self.device,
-        )
+        # 直接前向拿原始 logits 张量，不用 predict()——predict 会把所有超过
+        # text_threshold 的 token 拼成一个短语，产生 "apple coke" 这类多标签。
+        with torch.no_grad():
+            outputs = self.gdino_model(image_transformed[None], captions=[self.text_prompt])
+        pred_logits = outputs["pred_logits"].cpu().sigmoid()[0]   # (nq, 256)
+        pred_boxes = outputs["pred_boxes"].cpu()[0]               # (nq, 4) cxcywh 归一化
+
+        if pred_boxes.shape[0] == 0:
+            return []
+
+        # 逐框对「真实文本 token」做 argmax，得到单一短语 + 该 token 的分数，
+        # 从根上消除拼接标签（只在 [CLS]/[SEP]/[.]/padding 之外的 token 上取 argmax）。
+        n_text = len(self._input_ids)
+        box_scores, token_idx = pred_logits[:, :n_text].max(dim=1)   # (nq,)
+        phrases = [self._token_segment_phrase(self._input_ids, int(k)) for k in token_idx]
+
+        # 候选框：只按框置信度筛（等价 text_threshold=0，关闭文本过滤）。
+        cand = box_scores > BOX_THRESHOLD
+        boxes = pred_boxes[cand]
+        box_scores = box_scores[cand]
+        phrases = [p for p, m in zip(phrases, cand.tolist()) if m]
 
         if boxes.shape[0] == 0:
             return []
@@ -151,9 +184,9 @@ class VisionPipeline:
         )
 
         # NMS 去重叠（在像素 xyxy 上算 IoU 才正确）
-        keep = self._nms(boxes_xyxy, logits, iou_threshold=NMS_IOU_THRESH)
+        keep = self._nms(boxes_xyxy, box_scores, iou_threshold=NMS_IOU_THRESH)
         boxes_xyxy = boxes_xyxy[keep]
-        logits = logits[keep]
+        logits = box_scores[keep]
         phrases = [phrases[i] for i in keep]
 
         # 置信度阈值过滤
@@ -165,12 +198,13 @@ class VisionPipeline:
         if boxes_xyxy.shape[0] == 0:
             return []
 
-        # 中心去重：GroundingDINO 可能把同一物体用不同 phrase 各框一次
-        # （如同一苹果既命中 "apple" 又命中 "coke"），框中心几乎重合时只留得分最高者。
-        dedup_idx = self._dedup_by_center(boxes_xyxy)
-        boxes_xyxy = boxes_xyxy[dedup_idx]
-        logits = logits[dedup_idx]
-        phrases = [phrases[i] for i in dedup_idx]
+        # INSID3 闭集复核：命中目标类 → 保留；命中干扰类 / 低置信 → 丢弃。
+        if self.reviewer is not None:
+            keep_idx, phrases = self.reviewer.review(img_bgr, boxes_xyxy)
+            if len(keep_idx) == 0:
+                return []
+            boxes_xyxy = boxes_xyxy[keep_idx]
+            logits = logits[keep_idx]
 
         # SAM2：框提示实例分割（期望绝对像素 xyxy）
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
@@ -203,27 +237,21 @@ class VisionPipeline:
             return (0.0, 0.0)
         return (float(xs.mean()), float(ys.mean()))
 
-    @staticmethod
-    def _dedup_by_center(boxes_xyxy, dist_px=30.0):
-        """按框中心距离合并重复框（同一物体被不同 phrase 框多次）。
+    def _token_segment_phrase(self, input_ids, idx):
+        """把 argmax 命中的 token 下标映射回其所属短语段（特殊 token 之间的一段）。
 
-        boxes_xyxy 已按得分从高到低排列（NMS 输出），因此先出现的高分框
-        获胜；后续框中心落在 dist_px 内视为同一物体，丢弃。返回保留的索引列表。
+        input_ids: caption 分词后的 token id 列表；idx: argmax 命中的下标。
+        特殊 token 即各短语的分隔符：[CLS]=101、[SEP]=102、[.]=1012、[?]=1029，
+        与 GroundingDINO 内部 specical_tokens 一致。
         """
-        boxes = boxes_xyxy.detach().cpu().numpy()
-        centers = (boxes[:, :2] + boxes[:, 2:]) / 2.0  # (cx, cy)
-        keep = []
-        for i in range(len(boxes)):
-            cx, cy = centers[i]
-            dup = False
-            for j in keep:
-                kx, ky = centers[j]
-                if (cx - kx) ** 2 + (cy - ky) ** 2 <= dist_px * dist_px:
-                    dup = True
-                    break
-            if not dup:
-                keep.append(i)
-        return keep
+        special = {101, 102, 1012, 1029}
+        start = idx
+        while start - 1 >= 0 and input_ids[start - 1] not in special:
+            start -= 1
+        end = idx
+        while end + 1 < len(input_ids) and input_ids[end + 1] not in special:
+            end += 1
+        return self.gdino_model.tokenizer.decode(input_ids[start:end + 1]).strip()
 
     # ── 可视化 ───────────────────────────────────────────────
 

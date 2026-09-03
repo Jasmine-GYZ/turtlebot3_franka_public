@@ -1336,5 +1336,78 @@
       <name>bowl_1</name>
       <pose>-3.5 -2.8 0.78 0 0 0</pose>
     </include>
+
+    <!-- 闭集复核参考图用：把 models/ 里 14 个干扰物各放一个到桌面上。
+         目标类 apple/coke_can/bowl/banana 已在上方 include。z=0.78 与桌面齐平。 -->
+    <include>
+      <uri>model://beer</uri>
+      <name>beer</name>
+      <pose>1.1 2.0 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://bleach_cleanser</uri>
+      <name>bleach_cleanser</name>
+      <pose>1.5 2.0 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://chips_can</uri>
+      <name>chips_can</name>
+      <pose>1.9 2.0 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://cracker_box</uri>
+      <name>cracker_box</name>
+      <pose>2.3 1.5 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://gelatin_box</uri>
+      <name>gelatin_box</name>
+      <pose>2.7 1.5 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://master_chef_can</uri>
+      <name>master_chef_can</name>
+      <pose>3.1 1.5 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://mustard_bottle</uri>
+      <name>mustard_bottle</name>
+      <pose>1.1 1.5 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://pitcher_base</uri>
+      <name>pitcher_base</name>
+      <pose>1.5 1.5 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://potted_meat_can</uri>
+      <name>potted_meat_can</name>
+      <pose>1.9 1.5 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://pudding_box</uri>
+      <name>pudding_box</name>
+      <pose>2.3 2.0 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://sugar_box</uri>
+      <name>sugar_box</name>
+      <pose>3.1 2.0 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://tomato_soup_can</uri>
+      <name>tomato_soup_can</name>
+      <pose>-3.7 -2.1 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://tuna_fish_can</uri>
+      <name>tuna_fish_can</name>
+      <pose>-2.9 -2.1 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://windex_bottle</uri>
+      <name>windex_bottle</name>
+      <pose>0.63 -2.2 0.78 0 0 0</pose>
+    </include>
   </world>
 </sdf>

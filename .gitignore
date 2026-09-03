@@ -15,3 +15,7 @@ __pycache__/
 # 日志 / 临时文件
 *.log
 *.gv
+
+# 大模型权重（官方门控下载，不进 git；且 ~342MB 超过 GitHub 单文件 100MB 限制）
+# DINOv3 base 骨干：turtlebot3_manipulation_navigation2/scripts/checkpoints/
+**/checkpoints/
