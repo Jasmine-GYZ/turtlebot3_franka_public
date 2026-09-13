@@ -8,7 +8,8 @@
               → 框转像素 xyxy → SAM2 实例分割
               → 计算每个实例的掩码 + 像素中心点 → 返回结果列表
 
-依赖环境：/home/jasmine/vision_env（同时含 torch/groundingdino/sam2 与 rclpy）。
+依赖环境：需先激活 Python 虚拟环境（含 torch/groundingdino-py/sam2 与 rclpy），
+见仓库根 setup.sh / requirements.txt。
 运行本文件可离线自测：  python3 vision_pipeline.py <图片路径>
 """
 
@@ -23,20 +24,30 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 # ─────────────────────────────────────────────────────────────
-# 修复 `import sam2` 被旧仓库目录 shadow 的问题
+# 路径解析（仓库根目录 + 第三方 submodule + 模型权重）
 # ─────────────────────────────────────────────────────────────
-# /home/jasmine 下还有一个旧副本 /home/jasmine/sam2（无 __init__.py 的
-# 命名空间包），会抢在真正的 sam2 包之前被导入，触发官方 build_sam.py 的
-# RuntimeError。这里把 src/sam2 仓库根目录插到 sys.path 最前面，
-# 确保 `import sam2` 解析到正确的包（sam2/sam2/）。
-_GDINO_REPO = "/home/jasmine/turtlebot3_ws/src/GroundingDINO"   # 仅用于取 config 路径
-_SAM2_REPO = "/home/jasmine/turtlebot3_ws/src/sam2"
+# 本文件位于 <repo>/turtlebot3_manipulation_navigation2/scripts/，向上 2 级即
+# 仓库根目录，third_party 子模块与 setup.sh / requirements.txt 都在这里。
+_REPO_ROOT = os.path.abspath(os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "..", ".."))
 
-# 注意：不要连 _GDINO_REPO 也塞进 sys.path —— 仓库里那版 groundingdino 是
-# v0.1.0，其 ms_deform_attn.py 缺 key_padding_mask 参数，与 transformer.py
-# 不匹配，推理会报 TypeError。vision_env 里已装 v0.3.0（可用），直接用已安装版。
+# 把 third_party/sam2 仓库根目录插到 sys.path 最前面，确保 `import sam2`
+# 解析到正确的包（sam2/sam2/），避免被机器上其它同名 sam2 副本 shadow。
+_SAM2_REPO = os.path.join(_REPO_ROOT, "third_party", "sam2")
 if _SAM2_REPO not in sys.path:
     sys.path.insert(0, _SAM2_REPO)
+
+# GroundingDINO 的模型代码来自已安装的 groundingdino-py（PyPI 包），其 config
+# 文件（GroundingDINO_SwinT_OGC.py）随包一起安装，用 find_spec 定位即可，
+# 无需额外的 GroundingDINO 仓库。注意用 find_spec 而非直接 import，避免触发
+# 重型依赖的加载。
+import importlib.util
+_GDINO_SPEC = importlib.util.find_spec("groundingdino")
+_GDINO_PKG_DIR = os.path.dirname(_GDINO_SPEC.origin) if _GDINO_SPEC else ""
+
+# 模型权重根目录（GroundingDINO / SAM2），可用环境变量 MODEL_WEIGHTS_DIR 覆盖。
+MODEL_WEIGHTS_DIR = os.environ.get("MODEL_WEIGHTS_DIR",
+                                   os.path.expanduser("~/model_weights"))
 
 import cv2
 import numpy as np
@@ -46,11 +57,10 @@ import numpy as np
 # 配置区（路径与阈值，与 sam2/run_pipeline.py 保持一致）
 # ═══════════════════════════════════════════════════════════════
 
-GDINO_CONFIG = os.path.join(_GDINO_REPO, "groundingdino", "config",
-                            "GroundingDINO_SwinT_OGC.py")
-GDINO_CKPT = "/home/jasmine/model_weights/groundingdino/groundingdino_swint_ogc.pth"
+GDINO_CONFIG = os.path.join(_GDINO_PKG_DIR, "config", "GroundingDINO_SwinT_OGC.py")
+GDINO_CKPT = os.path.join(MODEL_WEIGHTS_DIR, "groundingdino", "groundingdino_swint_ogc.pth")
 
-SAM2_CKPT = "/home/jasmine/model_weights/sam2/sam2_hiera_small.pt"
+SAM2_CKPT = os.path.join(MODEL_WEIGHTS_DIR, "sam2", "sam2_hiera_small.pt")
 SAM2_CONFIG_NAME = "sam2_hiera_s.yaml"
 
 # 待计数物品（英文名）。GroundingDINO 的 caption 用 " . " 分隔多个文本查询，
@@ -71,7 +81,7 @@ NMS_IOU_THRESH = 0.55
 # 最终保留阈值：不能太高——table_3 的真苹果在不同运行里只有 0.43~0.58，提到 0.50
 # 会把它误杀。空桌假阳性（桌腿被认成 coke）不用分数过滤，改由 patrol_task 里的
 # 高度过滤（/map z 低于桌面高度即丢弃）处理。
-CONF_KEEP = 0.38
+CONF_KEEP = 0.30
 
 
 def classify_phrase(phrase):

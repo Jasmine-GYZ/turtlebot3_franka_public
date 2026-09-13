@@ -8,11 +8,13 @@
   3. 依次导航到 4 个观察点（到达 → GroundingDINO+SAM2 识别 → 下一个）
   4. 汇总输出每个观察点的检测结果（目标数量 + 像素中心点）
 
-用法（需先激活 /home/jasmine/vision_env，含 torch/groundingdino/sam2 与 rclpy）:
-  source /home/jasmine/vision_env/bin/activate
+用法（需先激活 Python 虚拟环境，含 torch/groundingdino-py/sam2 与 rclpy，
+见仓库根 setup.sh / requirements.txt）:
+  source ~/vision_env/bin/activate
   ros2 run turtlebot3_manipulation_navigation2 patrol_task.py
 """
 
+import json
 import math
 import os
 import threading
@@ -85,6 +87,32 @@ MIN_OBJECT_Z = 0.70
 # 是否保存每个观察点的标注结果图（检测框 + 分割轮廓 + 中心点），调试用
 SAVE_DEBUG_IMAGE = True
 DEBUG_IMAGE_DIR = os.path.expanduser("~/turtlebot3_detections")
+
+# ═══════════════════════════════════════════════════════════════
+# 答案 JSON（评分程序要求）
+# ═══════════════════════════════════════════════════════════════
+# 组号（腾讯文档组号）。答案文件会命名为 <GROUP_NUMBER>_answer.json，
+# 务必改成本队的真实组号，否则评分系统按无效文件处理。
+GROUP_NUMBER = 3
+
+# 答案输出目录。自测时把 <GROUP_NUMBER>_answer.json 放进 submissions/，
+# 即可直接跑 src/scoring/score_submission.py。可用环境变量 ANSWER_OUTPUT_DIR 覆盖。
+ANSWER_OUTPUT_DIR = os.environ.get(
+    "ANSWER_OUTPUT_DIR", os.path.expanduser("~/turtlebot3_ws/submissions"))
+
+# 内部类别名 → 评分规范类别名的映射。评分要求类别名与裁判发布完全一致
+# （含大小写/下划线），而内部 GroundingDINO prompt 用空格 "coke can"，
+# 这里转成规范名 "coke_can"。
+NAME_TO_JSON = {
+    "apple": "apple",
+    "coke can": "coke_can",
+    "bowl": "bowl",
+    "banana": "banana",
+}
+
+# 本轮需写入 answers 的目标类别（规范名）。example 测试只有 apple、coke_can；
+# 正式比赛的三个类别由裁判发布后改这里即可（并确保 NAME_TO_JSON 覆盖它们）。
+TARGET_CLASSES_JSON = ["apple", "coke_can"]
 
 
 def yaw_to_quat(yaw):
@@ -617,6 +645,30 @@ class CompetitionTask(Node):
 
     # ── 完成 ───────────────────────────────────────────────────
 
+    def _save_answer_json(self):
+        """把累计识别结果写成评分要求的 <GROUP_NUMBER>_answer.json。
+
+        只输出 TARGET_CLASSES_JSON 中的类别（评分要求类别集合必须与裁判发布
+        完全一致，不能多不能少）；未识别到的类别保留空数组。坐标直接用 /map
+        帧的 x、y（map 帧与 Gazebo world 帧重合，无需 corners）。
+        """
+        by_class = {name: [] for name in TARGET_CLASSES_JSON}
+        for obj in self._seen_objects:
+            json_name = NAME_TO_JSON.get(obj["name"])
+            if json_name in by_class:
+                by_class[json_name].append({"x": float(obj["x"]), "y": float(obj["y"])})
+
+        document = {"objects": by_class}
+        os.makedirs(ANSWER_OUTPUT_DIR, exist_ok=True)
+        out_path = os.path.join(ANSWER_OUTPUT_DIR, "{}_answer.json".format(GROUP_NUMBER))
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(document, f, ensure_ascii=False, indent=2, allow_nan=False)
+            f.write("\n")
+
+        counts = {name: len(by_class[name]) for name in TARGET_CLASSES_JSON}
+        self.get_logger().info("答案文件已保存: {} （各类数量 {}）".format(out_path, counts))
+        print("答案文件已保存: {} （各类数量 {}）".format(out_path, counts), flush=True)
+
     def _all_done(self):
         self.get_logger().info("=" * 45)
         self.get_logger().info("所有观察点扫描完成")
@@ -629,6 +681,9 @@ class CompetitionTask(Node):
             print("  {}: {}".format(name, self._item_counts.get(name, 0)), flush=True)
         print("====================================\n", flush=True)
         self.get_logger().info("累计计数: {}".format(self._item_counts))
+
+        # 生成评分程序要求的答案 JSON
+        self._save_answer_json()
 
 
 def main():

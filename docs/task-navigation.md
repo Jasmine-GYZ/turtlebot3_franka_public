@@ -58,7 +58,7 @@ WAYPOINTS = [
 注意事项：
 
 - 模型（GroundingDINO + SAM2）在**首次识别时**加载，第一个观察点会额外花几十秒。
-- 必须用 `/home/jasmine/vision_env` 环境跑节点（同时含 torch/groundingdino/sam2 与 rclpy）。
+- 必须用虚拟环境跑节点（同时含 torch/groundingdino-py/sam2 与 rclpy），先 `source ~/vision_env/bin/activate`。
 - 刻意不用 cv_bridge（当前环境 numpy 2.x 与 ROS 的 cv_bridge ABI 不兼容），图像解码用手动 numpy。
 - 相机光学帧：Gazebo 给相机帧加 `turtlebot3/` 前缀，启动文件已用 `override_frame_id: camera_rgb_optical_frame` 覆盖，与 TF 树对齐。
 - 去重：相邻观察点可能扫到同一物体（或把远处物体认错），按 `/map` 坐标距离合并（`DEDUP_DIST=0.25m`），同一位置只计一次、只标一个 Marker（首次登记为准）。

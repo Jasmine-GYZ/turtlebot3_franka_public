@@ -37,8 +37,12 @@ import numpy as np
 # ─────────────────────────────────────────────────────────────
 # INSID3 内部用裸 `models`/`utils` 包名，插入 sys.path 最前并只在
 # 本模块内惰性 import，避免与其它包冲突。
-_INSID3_REPO = "/home/jasmine/turtlebot3_ws/src/INSID3"
-_DINOV3_REPO = "/home/jasmine/turtlebot3_ws/src/dinov3"
+# 本文件位于 <repo>/turtlebot3_manipulation_navigation2/scripts/，向上 2 级即
+# 仓库根目录，third_party 子模块就在这里。
+_REPO_ROOT = os.path.abspath(os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "..", ".."))
+_INSID3_REPO = os.path.join(_REPO_ROOT, "third_party", "INSID3")
+_DINOV3_REPO = os.path.join(_REPO_ROOT, "third_party", "dinov3")
 for _p in (_INSID3_REPO, _DINOV3_REPO):
     if _p not in sys.path:
         sys.path.insert(0, _p)
