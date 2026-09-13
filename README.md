@@ -29,6 +29,7 @@ GroundingDINO + SAM2（+ INSID3 复核）的开放集视觉识别流水线。
 │   └── dinov3/    # facebookresearch/dinov3
 ├── setup.sh                            # 一键搭建环境
 ├── download_weights.sh                 # 下载模型权重
+├── build.sh                            # 干净环境构建
 ├── requirements.txt                    # 视觉识别 Python 依赖
 ├── docs/
 │   ├── turtlebot3-fr3-fortress-integration.md  # TB3+FR3 集成细节（含改动清单）
@@ -56,7 +57,7 @@ bash setup.sh              # 无 GPU 用 CPU 版 torch；有 NVIDIA GPU 加 --cu
 
 # 3. 构建
 cd ~/turtlebot3_ws
-bash src/turtlebot3_franka/../build.sh   # 或见下方「构建」一节的 colcon 命令
+bash src/turtlebot3_franka/build.sh   # 或见下方「构建」一节的 colcon 命令
 source install/setup.bash
 ```
 
@@ -143,7 +144,7 @@ source install/setup.bash
 ```
 
 > 用 `--symlink-install`，之后改 `patrol_task.py` 等 Python 脚本无需重新编译。
-> 仓库根的 `build.sh`（在你把它放入工作区后位于 `<ws>/src/turtlebot3_franka/../build.sh`）
+> 仓库根的 `build.sh`（克隆后位于 `<ws>/src/turtlebot3_franka/build.sh`）
 > 会在干净环境里构建（清空 ROS 前缀、只 source 系统 ROS），避免脏终端污染。
 
 ## 运行（三个终端）
