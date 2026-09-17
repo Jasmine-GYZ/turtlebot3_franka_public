@@ -1,3 +1,12 @@
+# ★ 2026-09-16 在 map.pgm 里【涂黑了餐厅那四张并排餐桌的桌面并集】
+#   x∈[0.9,3.3] × y∈[1.25,2.25]（example.world 里 dinning_table_0..3 的静态足迹），
+#   共 942 格（判据：格心落在桌块内即算占据）。原始地图留档在同目录 map.pgm.bak ✓
+#   为什么：桌面在 z=0.765，雷达在桌面以下只能扫到 8 条桌腿 → 原来桌块内部是"代价 0 的
+#   空地"，NavFn 会把站位规划到桌块里，车开上去撞桌、卡住 22 s 还报 SUCCESS（9/16 实测）；
+#   涂黑后：① 错站位 (3.076,1.489) 由"可通过(251)"变"致命(253)→直接拒收"；
+#   ② grasp_phase 的 NavMap 读的是同一份文件 → 南/西面自动失效，改走东/北面。
+#   代价：贴桌站位离桌沿只有 EDGE_CLEARANCE，必须 ≥ robot_radius(0.28)（现为 0.32）
+#   依赖：grasp_phase.py 的 EDGE_CLEARANCE / _face_ok 的够得着判据
 image: map.pgm
 mode: trinary
 resolution: 0.05

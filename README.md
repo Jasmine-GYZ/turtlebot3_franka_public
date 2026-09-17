@@ -1,8 +1,9 @@
 # TurtleBot3 + FR3 导航仿真
 
 TurtleBot3 Waffle Pi + FR3 机械臂在 **Gazebo Fortress (Ignition Gazebo)** 中的仿真包，
-包含机器人仿真、仿真场景、导航（Nav2）与串行巡逻任务节点，以及一套
-GroundingDINO + SAM2（+ INSID3 复核）的开放集视觉识别流水线。
+包含机器人仿真、仿真场景、导航（Nav2）、串行巡逻任务节点、一套
+GroundingDINO + SAM2（+ INSID3 复核）的开放集视觉识别流水线，
+以及基于 **MTC（MoveIt Task Constructor）** 的抓取阶段。
 
 ## 包含内容
 
@@ -10,7 +11,9 @@ GroundingDINO + SAM2（+ INSID3 复核）的开放集视觉识别流水线。
 |---|---|
 | `franka_description` | FR3 机械臂 URDF/meshes（tag 2.8.1），仿真 URDF 的硬依赖 |
 | `turtlebot3_manipulation_gazebo` | 仿真 spawn 启动（`turtlebot3_franka.launch.py`）、TB3+FR3 URDF、ros2_control 配置、网格 |
-| `turtlebot3_manipulation_navigation2` | Nav2 启动（`navigation.launch.py`）、地图/参数、任务节点 `patrol_task.py`、视觉识别流水线 `vision_pipeline.py`、INSID3 复核 `insid3_review.py`、cmd_vel 桥接 |
+| `turtlebot3_manipulation_navigation2` | Nav2 启动（`navigation.launch.py`）、地图/参数、任务节点 `patrol_task.py`、视觉识别流水线 `vision_pipeline.py`、INSID3 复核 `insid3_review.py`、抓取阶段 `grasp_phase.py` + 调试入口 `dining_grasp_task.py`、cmd_vel 桥接 |
+| `turtlebot3_manipulation_grasp` | **MTC 抓取包**：抓取规划节点 `grasp_node`、`/detect_grasp_target` 视觉服务 `detect_grasp_target_node.py`、抓取服务 `grasp_service.launch.py`、目标物配置 `config/objects.yaml`。⚠️ 该视觉服务**默认不在本包启动**，而是由 `patrol_task` 同进程托管（见「运行」） |
+| `turtlebot3_moveit_config` | **MoveIt 2 配置**：SRDF、运动学/关节限位/控制器/OMPL 参数，`move_group` 启动（抓取规划依赖） |
 | `wpr_simulation_ros2` | 仿真场景资源（`worlds/example.world` + `models/`） |
 | `third_party/` | 视觉识别用的第三方源码（git submodule，固定 commit） |
 | `docs/` | 两份说明文档（见下） |
@@ -22,6 +25,8 @@ GroundingDINO + SAM2（+ INSID3 复核）的开放集视觉识别流水线。
 ├── franka_description/                 # FR3 机械臂 URDF/meshes（依赖）
 ├── turtlebot3_manipulation_gazebo/     # 仿真包
 ├── turtlebot3_manipulation_navigation2/  # 导航 + 任务 + 视觉识别包
+├── turtlebot3_manipulation_grasp/      # MTC 抓取包（规划节点 + 抓取服务）
+├── turtlebot3_moveit_config/           # MoveIt 2 配置（SRDF/运动学/OMPL）
 ├── wpr_simulation_ros2/                # 仿真场景包
 ├── third_party/                        # git submodule（固定 commit）
 │   ├── sam2/      # facebookresearch/sam2
@@ -42,6 +47,7 @@ GroundingDINO + SAM2（+ INSID3 复核）的开放集视觉识别流水线。
 - **Ubuntu 22.04 + ROS 2 Humble**
 - **Gazebo Fortress (Ignition Gazebo)** + `ros_gz_sim` / `ros_gz_bridge` / `gz_ros2_control`
 - **Navigation2**：`ros-humble-navigation2`、`ros-humble-nav2-bringup`
+- **MoveIt 2 2.5.10 + MTC**：抓取阶段依赖，见下方「额外依赖」
 - **Python 3.10**（虚拟环境，见下）
 
 ## 快速开始（一键）
@@ -71,8 +77,21 @@ source install/setup.bash
 | `ros2_control`、`ros2_controllers`、`gripper_controllers` | `sudo apt install ros-humble-ros2-control ros-humble-ros2-controllers ros-humble-gripper-controllers` |
 | `ros_gz_sim`、`ros_gz_bridge`、`gz_ros2_control` | `sudo apt install ros-humble-ros-gz-sim ros-humble-ros-gz-bridge ros-humble-gz-ros2-control` |
 | `rviz2` | `sudo apt install ros-humble-rviz2` |
+| **MoveIt 2 + MTC**（抓取阶段必需） | `sudo apt install ros-humble-moveit ros-humble-moveit-configs-utils ros-humble-moveit-task-constructor-{core,capabilities,msgs,visualization}` |
 
 > `franka_description` 已打包在本仓库里，无需再单独 clone。
+>
+> ⚠️ **MoveIt 版本必须与 MTC 匹配**：apt 仓库的 `ros-humble-moveit-task-constructor-core`
+> 只有 `0.1.3` 一个版本，它是针对 **MoveIt 2.5.10** 编译的。若本机是 2.5.9，
+> `libmoveit_*.so.2.5.9` 与 `libmoveit_*.so.2.5.10` 对不上，`grasp_node`
+> 链接期和运行期都会失败（`ldd` 一片 `not found`）。升级：
+>
+> ```bash
+> sudo apt install --only-upgrade 'ros-humble-moveit-*'
+> ```
+>
+> 升级后若构建报「没有规则可制作目标 `libmoveit_move_group_interface.so.2.5.9`」，
+> 是旧的 build 缓存作祟，删掉重编即可：`rm -rf build/ install/turtlebot3_manipulation_grasp`
 
 ## 视觉识别（GroundingDINO + SAM2 + INSID3 复核）
 
@@ -139,6 +158,8 @@ colcon build --symlink-install \
   --packages-select franka_description \
   turtlebot3_manipulation_gazebo \
   turtlebot3_manipulation_navigation2 \
+  turtlebot3_manipulation_grasp \
+  turtlebot3_moveit_config \
   wpr_simulation_ros2
 source install/setup.bash
 ```
@@ -146,8 +167,33 @@ source install/setup.bash
 > 用 `--symlink-install`，之后改 `patrol_task.py` 等 Python 脚本无需重新编译。
 > 仓库根的 `build.sh`（克隆后位于 `<ws>/src/turtlebot3_franka/build.sh`）
 > 会在干净环境里构建（清空 ROS 前缀、只 source 系统 ROS），避免脏终端污染。
+>
+> ⚠️ **推荐直接用 `bash build.sh`，不要手敲上面的 colcon 命令**。除了清环境，
+> `build.sh` 还内置了一处必需的环境修补：`turtlebot3_manipulation_grasp` 带
+> msg/srv，rosidl 生成 Python 类型时 `ament_cmake_python` 会调用用户级的
+> setuptools，而它需要比系统 `packaging 21.3` 更新的版本，直接报
+> `TypeError: canonicalize_version() got an unexpected keyword argument 'strip_trailing_zero'`。
+> `build.sh` 会往 `<ws>/.build_pydeps` 装一份隔离的 `packaging`，只通过
+> `PYTHONPATH` 注入本次构建（不碰系统、不碰 `~/.local`；删该目录即回退）。
+>
+> 构建时出现 `--allow-overriding turtlebot3_manipulation_gazebo
+> turtlebot3_manipulation_navigation2` 警告属**已知遗留**（apt 里另装了一份同名包），
+> 不影响构建结果。
+>
+> 改过 `param/*.yaml` 或 `urdf/*.xacro` 后**必须重新构建**：yaml 在 Nav2 启动时读取、
+> xacro 在 launch 时展开，只改源码不会生效。
 
-## 运行（三个终端）
+## 运行（四个终端）
+
+**顺序不能乱**：终端 1 起完再起 2，抓取服务（终端 3）必须在任务节点（终端 4）
+进入抓取阶段之前就绪，否则抓取阶段会因为服务端不存在而失败。
+
+> ★ **视觉模型只加载一份**（2026-09-16 改）：`/detect_grasp_target` 这个视觉服务
+> 现在由**终端 4 的 `patrol_task` 进程内托管**，直接复用 patrol 自己那套
+> GroundingDINO + SAM2 + INSID3，所以终端 3 **不再起第二个视觉进程**。
+> 原因：两个进程各加载一整套模型合占 ~5 GiB / 8.15 GiB，实测双双 CUDA OOM，
+> Phase 2 抓取直接报废。现在全系统只有**一个** python 进程占 GPU（~2.8 GiB），
+> 用 `nvidia-smi --query-compute-apps=pid,used_memory --format=csv` 可核对。
 
 **终端 1 — 仿真 + spawn 机器人（含 FR3 臂）**
 
@@ -155,21 +201,132 @@ source install/setup.bash
 ros2 launch turtlebot3_manipulation_gazebo turtlebot3_franka.launch.py
 ```
 
+启动后 Gazebo 窗口出现、机器人落在起点。确认 `/clock` 有在走（`ros2 topic hz /clock`）。
+
 **终端 2 — 导航（Nav2 + 地图 + 参数）**
 
 ```bash
 ros2 launch turtlebot3_manipulation_navigation2 navigation.launch.py
 ```
 
-**终端 3 — 任务节点（初始定位 → 串行巡逻 + 视觉识别）**
+确认代价地图起来了、AMCL 收到激光（`ros2 topic hz /scan`）。
+
+**终端 3 — 抓取服务（MoveIt move_group + MTC 抓取节点）**
 
 ```bash
-source ~/vision_env/bin/activate   # 视觉识别依赖环境（必须先激活）
+ros2 launch turtlebot3_manipulation_grasp grasp_service.launch.py
+```
+
+**不需要** `source ~/vision_env/bin/activate`，也**不加载任何视觉模型** ——
+这里只起 `move_group` 和 MTC 抓取节点 `grasp_node`。视觉服务 `/detect_grasp_target`
+由终端 4 的 patrol 进程托管（见上方说明），本 launch 的 `enable_vision` 默认 `false`。
+
+**终端 4 — 任务节点（初始定位 → 串行巡逻 + 视觉识别 → 抓取）**
+
+```bash
+source ~/vision_env/bin/activate
 ros2 run turtlebot3_manipulation_navigation2 patrol_task.py
 ```
 
-任务节点会依次导航到 4 个客厅观察点（顺序 `table_3 → table_1 → table_0 → table_2`），
-到达后站稳识别（GroundingDINO + SAM2），再移动到下一个。详见 `docs/task-navigation.md`。
+> ⚠️ 虚拟环境必须是**装全依赖的那一个**（默认 `~/vision_env`）—— 全局唯一的那份
+> 视觉模型就在这里加载。缺 `einops` / `scikit-learn` 时 INSID3 闭集复核会
+> **静默降级为「无复核」**，香蕉这类物体可能被 GroundingDINO 误判成苹果
+> —— 不报错，但结果错。启动日志里应有 `视觉模型加载完成。`
+> （装了复核权重时约 77 s）与 `grasp 视觉服务已在本进程托管（共享同一套模型）`。
+
+任务节点分两个阶段：
+
+- **Phase 1 巡逻**：依次导航到 4 个客厅观察点（顺序 `table_3 → table_1 → table_0 → table_2`），
+  到达后站稳识别（GroundingDINO + SAM2 + INSID3 复核），再移动到下一个。详见 `docs/task-navigation.md`。
+- **Phase 2 抓取**：巡逻结束后（写完答案 JSON）转入抓取阶段 —— 到餐桌 3 的**观察位**选目标 →
+  导航到**站位**（物体正前方 0.33~0.39 m）→ **相对闭环微调**把物体对正到
+  `base_footprint(0.33, 0)` → 调 `/grasp_fixed_object` 由 MTC 执行抓取。
+
+> 抓取阶段只读**视觉**，不读 Gazebo 真值（规则书禁止）。桌号不硬编码，
+> 来自 `turtlebot3_manipulation_grasp/config/grasp_params.yaml` 的 `support_surface`；
+> 可抓目标物在 `config/objects.yaml`。
+>
+> **当前状态（2026-09-16）**：整条链已跑通到 `stage=0`（观察位选目标 → 导航站位 →
+> 相对闭环微调 → MTC 抓取服务调用全部走通），但**物理夹持尚未成功** ——
+> 现象是夹爪看着包住物体、能闭合，物体却不动。判据见下。
+
+### 只调抓取阶段（跳过巡逻）
+
+调试抓取时不必每次跑完整巡逻，用调试入口单独起抓取阶段。
+
+这条路径**没有 patrol 进程**，所以视觉服务没人托管，必须在终端 3 单独拉起来
+（这时它才自己加载一套模型，是唯一还需要视觉 venv 的场景）：
+
+```bash
+# 终端 3（改用这个，多带 enable_vision:=true；这条路径才需要激活视觉 venv）
+source ~/vision_env/bin/activate
+ros2 launch turtlebot3_manipulation_grasp grasp_service.launch.py enable_vision:=true
+
+# 终端 4
+source ~/vision_env/bin/activate
+ros2 run turtlebot3_manipulation_navigation2 dining_grasp_task.py
+```
+
+常用开关：
+
+| 开关 | 作用 |
+|---|---|
+| `--classes "tomato_soup_can"` | 只找指定类别（逗号分隔），用于干净对照 |
+| `--skip-nav` | 跳过导航（机器人已手动停好），只测服务链路 |
+| `--no-creep` | 跳过相对闭环微调 |
+| `--keep-pose` | 不重发 `/initialpose`，沿用当前 AMCL 位姿（仿真已在跑、车已在桌边时重测用）|
+| `--observation "x,y,yaw"` | 手工指定观察位（默认按餐桌桌沿法线自动算）|
+| `--park-x/--park-y/--park-yaw` | 固定站位（默认由选中物体位置算）|
+
+### 抓取是否夹住的判据
+
+`grasp_phase.py` 会直接量**两指真实间距**（`fr3_leftfinger` 与 `fr3_rightfinger`
+两个 TF 帧的距离），并在合爪后自动判定，认准这三行之一：
+
+| 日志 | 含义 |
+|---|---|
+| `✓ 手指停在 X mm ≈ 物体窄边 Y mm → 夹到了物体（接触即停）` | **夹到了** —— 手指被物体挡住 ✓ |
+| `✗ 手指停在 X mm —— 比物体窄边 Y mm 还宽 → 没夹到物体（或夹到了别的东西）` | 两指之间是空的 ✗ ⇒ 问题在抓取点的**位置/高度**，不要再查别的 |
+| `? 手指合到 X mm，比物体窄边 Y mm 还小 → 物体被挤走 / 没在两指之间` | 合过头了，物体被推走 ✗ |
+
+另外两行是有用的旁证：
+
+- `合爪前两指真实间距 = X mm；指尖平面 base(x,y,z)` —— 合爪**前**的开口
+- `指尖轨迹(本次调用): x a→b（最远 c） z d→e` —— **最远 x 应 ≈ 抓取点的 x** ✓
+
+> 判据需要物体的真实窄边（来自 `config/objects.yaml`），所以日志里会同时打出
+> `预期合爪: 物体窄边 Y m − 干涉 Z → 关节 Q（两指间距 R mm）` 作为参照。
+
+### 为抓取调整过的导航参数
+
+`turtlebot3_manipulation_navigation2/param/turtlebot3_use_sim_time.yaml`
+（`navigation.launch.py` 加载的那份）**目前只改了 1 个值**：
+
+| 参数 | 值 | 为什么 |
+|---|---|---|
+| `robot_radius` | 0.28（原 0.35） | 抓取站位要求车心离桌沿 0.26 m（`grasp_phase.py` 的 `EDGE_CLEARANCE`）。0.35 的致命膨胀区会把站位吞掉，规划器直接拒收目标点 → 车到不了桌边 |
+
+曾一并放宽过的另外三项（`xy_goal_tolerance` 0.4、`inflation_radius` 0.45、
+`cost_scaling_factor` 4.0）**已回退成原值 0.25 / 0.55 / 3.0** —— 它们只是配合性的
+放宽/少绕路，回退不影响抓取可达性。
+
+> ⚠️ 即便是 `robot_radius`，它也**同时作用于 Phase 1 巡逻**（会贴障碍物更近）。
+> 动过之后巡逻阶段需要单独回归验证。
+
+### 已知问题：向前伸臂时车体前倾（未修）
+
+底盘的支撑多边形只有 `[x=-0.177, x=0]` —— **两个万向轮都在后方**（`caster_back_left/right`，
+world 里 x=-0.177），驱动轮在 x=0，**前方没有任何支撑点**。而机械臂 19.6 kg、质心高 0.87 m
+（底盘才 1.55 kg），所以向前伸臂抓取时整车必然前倾：实测 **pitch 达 0.22 rad ≈ 12.6°**，
+导致末端偏离约 **7 cm**，抓不到物体。
+
+一个修法是**加前万向轮**（`caster_front_joint`，origin `xyz="0.18 0.0 -0.004"`），
+把支撑多边形前边界推到 +0.18 —— 但**当前未采纳，URDF 是原样**。
+
+> 若要重新采纳，**必须同时在 `gazebo/turtlebot3_waffle_pi.gazebo.xacro` 里补一个
+> `<gazebo reference="caster_front_link">` 块**，把 `mu1`/`mu2` 设成 `0.1`
+> （照抄后万向轮那两个块）。否则它用 Gazebo 的默认摩擦（≈1.0），会变成一块
+> **高摩擦刹车垫**而不是万向轮 —— 不但不解决问题，还会在转向时跟车较劲。
 
 ### 比赛答案 JSON（评分用）
 
@@ -187,9 +344,41 @@ ros2 run turtlebot3_manipulation_navigation2 patrol_task.py
 
 ## 进程清理（重启仿真前）
 
+分终端 `Ctrl-C` 最干净；若进程残留（仿真重启后行为诡异、话题接不上），按下面清：
+
 ```bash
+# 仿真 / 桥接
 pkill -9 -f 'ign gazebo'
 pkill -9 -f parameter_bridge
-pkill -9 -f robot_state_publisher
 pkill -9 -f ros_gz_bridge
+pkill -9 -f robot_state_publisher
+# 导航（逐个点名，别用宽泛的 nav2 —— 它会把路径里含该串的任务节点一起杀掉）
+pkill -9 -f amcl
+pkill -9 -f bt_navigator
+pkill -9 -f controller_server
+pkill -9 -f planner_server
+pkill -9 -f smoother_server
+pkill -9 -f behavior_server
+pkill -9 -f waypoint_follower
+pkill -9 -f velocity_smoother
+pkill -9 -f map_server
+# 抓取（move_group / MTC 抓取节点）
+pkill -9 -f move_group
+pkill -9 -f grasp_node
+# 视觉服务：正常流程下它**不是独立进程**，寄生在 patrol_task 里（下一行一并清掉）。
+# 只有 enable_vision:=true 的独立调试路径才会有这个进程。
+pkill -9 -f detect_grasp_target
+# 任务节点（★ 视觉服务寄生在这里，清它就等于清掉视觉服务）
+pkill -9 -f patrol_task
+pkill -9 -f dining_grasp_task
 ```
+
+> 残留检查：`nvidia-smi --query-compute-apps=pid,used_memory --format=csv` 应该**没有**
+> python 进程占显存。上面这套 `pkill` 如果漏了，patrol 进程会活着继续占 ~2.8 GiB，
+> 下一次启动的模型加载就可能 CUDA OOM（2026-09-16 就吃过这个亏）。
+
+> 注意：`pkill -f` 用扩展正则，**模式里不要写 `\|`**（那会变成字面竖线，匹配不到）。
+> 需要多选就用真正的 `|`，或像上面一样逐个点名。
+>
+> `move_group` 残留时抓取服务端口会占着，新起的 `grasp_service.launch.py`
+> 看起来"起来了"但服务调不通 —— 重启仿真前务必清掉。

@@ -28,11 +28,29 @@ source /opt/ros/humble/setup.bash
 WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$WS_ROOT"
 
+# ── 3.5 修 setuptools / packaging 版本冲突（rosidl 生成 Python 类型时才会撞上）──
+# 现象（只在带 msg/srv 的包上出现，如 turtlebot3_manipulation_grasp）：
+#   TypeError: canonicalize_version() got an unexpected keyword argument 'strip_trailing_zero'
+# 原因：ament_cmake_python 会调用 ~/.local 的 setuptools 83.0.0，而它需要
+#   packaging >= 22；本机只有 apt 的 21.3（ros2cli/colcon/rosdistro 都依赖它，不能换）。
+# 为什么不干脆屏蔽用户级包（PYTHONNOUSERSITE=1）：
+#   rosidl 生成必需的 empy 只在 ~/.local 里装，屏蔽掉会直接失败 ✗
+# 解法：往工作区内的隔离目录装一份新版 packaging，仅通过 PYTHONPATH 注入本次构建。
+#   不碰 ~/.local、不碰系统；想回退删掉 $WS_ROOT/.build_pydeps 即可。
+PYDEPS="$WS_ROOT/.build_pydeps"
+if [ ! -d "$PYDEPS/packaging" ]; then
+  echo "首次构建：往 $PYDEPS 装一份隔离的 packaging（不污染系统环境）..."
+  pip install --target="$PYDEPS" --no-deps --quiet packaging
+fi
+export PYTHONPATH="$PYDEPS${PYTHONPATH:+:$PYTHONPATH}"
+
 # ── 4. 构建 ────────────────────────────────────────────────────
 colcon build --symlink-install \
   --packages-select franka_description \
                    turtlebot3_manipulation_gazebo \
                    turtlebot3_manipulation_navigation2 \
+                   turtlebot3_manipulation_grasp \
+                   turtlebot3_moveit_config \
                    wpr_simulation_ros2
 
 echo ""
