@@ -60,9 +60,11 @@ INSID3_CKPT_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "che
 INSID3_MODEL_SIZE = "base"   # small / base / large
 INSID3_CKPT = os.path.join(INSID3_CKPT_DIR, "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth")
 INSID3_IMAGE_SIZE = 768      # 输入分辨率，越小越快（768 兼顾速度与精度）
-# 闭集置信度下限：patch 与最优类别的平均余弦相似度低于此值判为背景丢弃。
-# 保守起见先设 0.0（余弦相似度 >=0 才认作命中），后续可按实测调。
-INSID3_MIN_CONF = 0.0
+# 闭集置信度下限：patch 与最终类别的余弦相似度低于此值判为背景/未知丢弃。
+# 2026-09-18 由 0.0 提到 0.35：实测真物体（苹果/可乐罐/碗/香蕉）复核 sim 都在
+# 0.47~0.75，而误检的垃圾框（红汤罐被判成 bowl）sim 只有 ~0.27，中间有 0.08+ 的空档。
+# 0.35 既能丢垃圾框，又不碰真物体（真苹果最低也 0.475）。
+INSID3_MIN_CONF = 0.35
 
 # 参考图根目录：本文件同级 reference_views/ 下每个物体的 6 视角渲染图。
 # （Gazebo 无背景渲染截图，比早期 UV 贴图更接近实拍视角。）
@@ -72,7 +74,7 @@ REF_MODELS_ROOT = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ref
 REF_VIEW_NAMES = ["front", "back", "left", "right", "top", "bottom"]
 
 # 目标类（label 与 vision_pipeline.ITEM_NAMES 对齐，保证 classify_phrase 命中）。
-TARGET_CLASSES = ["apple", "coke can", "bowl", "banana"]
+TARGET_CLASSES = ["apple", "coke can", "bleach cleanser"]
 
 # 闭集类别集合：label -> reference_views 下的子目录名（含 6 视角渲染图）。
 # 目标类 + 干扰类（仿真里可能出现的其它 YCB 物体）全部纳入，用于剔除干扰。
@@ -80,14 +82,14 @@ INSID3_CLASSES = {
     # ── 目标类 ──
     "apple":    "apple",
     "coke can": "coke_can",
+    "bleach cleanser": "bleach_cleanser",
+    # ── 干扰类 ──
     "bowl":     "bowl",
     "banana":   "banana",
-    # ── 干扰类 ──
     "cracker box":    "cracker_box",
     "sugar box":      "sugar_box",
     "chips can":      "chips_can",
     "beer":           "beer",
-    "bleach cleanser": "bleach_cleanser",
     "mustard bottle": "mustard_bottle",
     "pudding box":    "pudding_box",
     "tomato soup can": "tomato_soup_can",
@@ -250,7 +252,7 @@ class Insid3Reviewer:
     # ── 主接口 ────────────────────────────────────────────────
 
     def review(self, img_bgr, boxes_xyxy):
-        """对候选框做闭集复核，返回 (保留下标, 保留标签)。
+        """对候选框做闭集复核，返回 (保留下标, 保留标签, 每框明细)。
 
         Args:
             img_bgr     : 原始 BGR 图像 (H, W, 3)。
@@ -258,17 +260,21 @@ class Insid3Reviewer:
         Returns:
             keep_idx    : list[int]，复核通过的框在输入数组中的下标。
             keep_labels : list[str]，对应每个框的最终类别（目标类之一）。
+            details     : list[dict]，每个成功 crop 的框一条，含 argmax 与第二名类别/相似度，
+                          用于诊断「目标类 vs 干扰类」边界靠得有多近（apple↔tomato_soup_can
+                          翻车点）。键：box_idx / argmax_label / argmax_sim /
+                          top2_label / top2_sim / kept。
         """
         import torch
 
         if boxes_xyxy is None or len(boxes_xyxy) == 0:
-            return [], []
+            return [], [], []
 
         boxes_np = boxes_xyxy.detach().cpu().numpy() if torch.is_tensor(boxes_xyxy) \
             else np.asarray(boxes_xyxy)
         patches, valid_idx, geoms = self._crop_patches(img_bgr, boxes_np)
         if len(patches) == 0:
-            return [], []
+            return [], [], []
 
         # 批量提取去偏置特征（一次前向）。拼成 (1, M, C, H, W)：B=1、T=M，
         # 与 INSID3 内部 predict_mask 的用法一致。
@@ -297,18 +303,49 @@ class Insid3Reviewer:
         # 与各类原型做余弦相似度（二者已 L2 归一化），argmax。
         sims = torch.einsum("mc,kc->mk", pooled, self.prototypes)         # (M, K)
         best_sim, best_idx = sims.max(dim=1)                     # (M,)
+        # ★ 诊断：再取第二名（runner-up），暴露「目标类 vs 干扰类」的边界靠得有多近。
+        top2_sim, top2_idx = sims.topk(2, dim=1)                 # (M, 2)
 
-        keep_idx, keep_labels = [], []
-        for j, (s, k) in enumerate(zip(best_sim, best_idx)):
-            label = self.class_labels[int(k)]
-            if label not in TARGET_CLASSES:
-                continue                       # 干扰类 → 丢弃
-            if float(s) < INSID3_MIN_CONF:
-                continue                       # 背景/未知 → 丢弃
-            keep_idx.append(valid_idx[j])      # 回映射到原始框下标
-            keep_labels.append(label)
+        # 2026-09-18 撤掉「置信门」REVIEW_DISTRACTOR_MARGIN：它本想救回被误判成芥末瓶的
+        # 真苹果（margin 0.011），实际却把复核已正确识别为干扰的红汤罐（margin 0.038<0.04）
+        # 改判成 coke can 造成误检——净负。回到「argmax 是干扰类就丢」的原始判据。
+        # 真苹果偶发被丢（~1/4 跑）交由参考图治本（用户暂缓），这里不硬补。
+        keep_idx, keep_labels, details = [], [], []
+        for j in range(sims.shape[0]):
+            s = float(best_sim[j])
+            k = int(best_idx[j])
+            label = self.class_labels[k]
 
-        return keep_idx, keep_labels
+            kept = False
+            gate = "drop"
+            if label in TARGET_CLASSES:
+                kept = True
+                gate = "ok"
+
+            if kept and s < INSID3_MIN_CONF:
+                kept = False          # 背景/未知 → 丢弃
+                gate = "drop"
+
+            # top2 展示「决赛 label 之外的最强对手」：margin 救回时能直接看到
+            #   被压下去的干扰类原来有多高（如 mustard bottle 0.4861 vs apple 0.4751）。
+            k_label = self.class_labels.index(label)
+            raw1 = int(top2_idx[j, 0])
+            other_k = int(top2_idx[j, 1]) if raw1 == k_label else raw1
+            other_s = float(top2_sim[j, 1]) if raw1 == k_label else float(top2_sim[j, 0])
+            details.append({
+                "box_idx": valid_idx[j],
+                "argmax_label": label,
+                "argmax_sim": round(s, 4),
+                "top2_label": self.class_labels[other_k],
+                "top2_sim": round(other_s, 4),
+                "kept": kept,
+                "gate": gate,
+            })
+            if kept:
+                keep_idx.append(valid_idx[j])      # 回映射到原始框下标
+                keep_labels.append(label)
+
+        return keep_idx, keep_labels, details
 
     # ── 工具 ──────────────────────────────────────────────────
 
@@ -361,10 +398,14 @@ def main():
     # 用整图作为单个候选框自测（实际由 vision_pipeline 传入检测框）。
     h, w = img_bgr.shape[:2]
     boxes = np.array([[0, 0, w, h]], dtype=np.float32)
-    keep_idx, keep_labels = reviewer.review(img_bgr, boxes)
+    keep_idx, keep_labels, details = reviewer.review(img_bgr, boxes)
     print("复核结果: {} 个框通过".format(len(keep_idx)))
     for i, l in zip(keep_idx, keep_labels):
         print("  {} box={}".format(l, [int(v) for v in boxes[i]]))
+    for d in details:
+        print("  [{}] argmax={} {:.4f} | top2={} {:.4f} | kept={}".format(
+            d["box_idx"], d["argmax_label"], d["argmax_sim"],
+            d["top2_label"], d["top2_sim"], d["kept"]))
 
 
 if __name__ == "__main__":

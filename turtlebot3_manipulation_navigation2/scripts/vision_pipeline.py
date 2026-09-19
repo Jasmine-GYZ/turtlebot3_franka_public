@@ -65,13 +65,12 @@ SAM2_CONFIG_NAME = "sam2_hiera_s.yaml"
 
 # 待计数物品（英文名）。GroundingDINO 的 caption 用 " . " 分隔多个文本查询，
 # 每个框返回的 phrase 就是命中的那一个查询文本。
-ITEM_NAMES = ["apple", "coke can", "bowl", "banana"]
+ITEM_NAMES = ["apple", "coke can", "bleach cleanser"]
 # 每种物品的别名（用于把检测到的 phrase 归一到待计数物品之一）。
 ITEM_ALIASES = {
     "apple": ["apple", "red round apple"],
     "coke can": ["coke", "can", "coca", "cola", "soda"],
-    "bowl": ["bowl"],
-    "banana": ["banana"],
+    "bleach cleanser": ["bleach", "cleanser"],
 }
 TEXT_PROMPT = " . ".join(ITEM_NAMES) + " ."
 
@@ -131,6 +130,12 @@ class VisionPipeline:
         tokenized = self.gdino_model.tokenizer(
             [self.text_prompt], padding="longest", return_tensors="pt")
         self._input_ids = tokenized["input_ids"][0].tolist()
+
+        # ★ 诊断用：把「闭集复核前 GDINO 提了哪些框」和「复核留下了几个」留一份给调用方。
+        #   复核是**静默丢弃**的（insid3_review.review 命中干扰类就 continue，一行日志都不打）
+        #   ⇒ 不记这个，"某物体漏检"就分不清是 GDINO 没给框，还是给了被复核丢掉了。
+        #   每次 detect() 覆盖。
+        self.last_review = None
 
         # INSID3 闭集复核（可选）：权重缺失 / 依赖缺失时降级为「无复核」，
         # 仍能产出 GroundingDINO(argmax)+SAM2 结果，不阻塞巡逻。
@@ -209,12 +214,33 @@ class VisionPipeline:
             return []
 
         # INSID3 闭集复核：命中目标类 → 保留；命中干扰类 / 低置信 → 丢弃。
+        # ★ 判据是「crop 的 DINOv3 特征 vs 各类原型 的 argmax」，**完全不看 GDINO 分数**
+        #   ⇒ 一个 0.9 分的框也可能因为原型判成干扰类被删掉（苹果曾整批被判成罐头）。
+        #   这里把复核前后的情况记进 last_review，供调用方打日志。
+        self.last_review = None
         if self.reviewer is not None:
-            keep_idx, phrases = self.reviewer.review(img_bgr, boxes_xyxy)
+            self.last_review = {
+                "proposed": [{"phrase": p, "score": round(float(s), 3)}
+                             for p, s in zip(phrases, logits)],
+                "kept": None,
+                "kept_labels": [],
+                "details": None,
+            }
+            keep_idx, kept_labels, details = self.reviewer.review(img_bgr, boxes_xyxy)
+            # 每条明细补上 GDINO 原始 phrase/score，调用方一行日志就能看到
+            # 「GDINO 说 apple，复核对 apple/tomato_soup_can 的相似度各是多少」。
+            for d in details:
+                bi = d["box_idx"]
+                d["phrase"] = phrases[bi]
+                d["gscore"] = round(float(logits[bi]), 3)
+            self.last_review["kept"] = len(keep_idx)
+            self.last_review["kept_labels"] = list(kept_labels)
+            self.last_review["details"] = details
             if len(keep_idx) == 0:
                 return []
             boxes_xyxy = boxes_xyxy[keep_idx]
             logits = logits[keep_idx]
+            phrases = kept_labels
 
         # SAM2：框提示实例分割（期望绝对像素 xyxy）
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
@@ -286,11 +312,15 @@ class VisionPipeline:
         return img
 
     def save_annotated(self, path, img_bgr, detections):
-        """保存标注结果图（自动创建父目录）。"""
+        """保存标注结果图（自动创建父目录）。返回是否写盘成功。
+
+        ★ 以前不返回、调用方也不检查 cv2.imwrite 的返回值 ⇒ 写盘失败时日志照样打
+        "结果图已保存"，拿着那句话去查漏检会白跑一趟。
+        """
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        cv2.imwrite(path, self.annotate(img_bgr, detections))
+        return bool(cv2.imwrite(path, self.annotate(img_bgr, detections)))
 
 
 # ── 离线自测入口 ─────────────────────────────────────────────

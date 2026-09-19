@@ -127,7 +127,18 @@
       <origin xyz="0 0 0.0584" rpy="0 0 ${pi}" />
       <axis xyz="0 1 0" />
       <limit effort="100" lower="0.0" upper="0.04" velocity="0.2" />
-      <mimic joint="${ee_prefix}finger_joint1" />
+      <!-- ★ 2026-09-18 删掉 <mimic joint="...finger_joint1"/>（原来是硬编码到这里的第一关节）。
+           夹爪两指在本工程里必须各自独立受控，而这一行 <mimic> 有三个消费者都会读它 ✗：
+             · MoveIt：把 joint2 当成 passive/mimic 关节 → **从 hand 组的 active joints 里剔除**
+               （`getActiveJointModelNames()` 只剩 fr3_finger_joint1）→ 规划出来的轨迹只有
+               1 个关节名 → JointTrajectoryController 直接拒收
+               （实跑报错：`Joints on incoming trajectory don't match the controller joints.`，
+                MoveIt 侧表现为 `Goal request rejected` / error_code=-4）。★ 主因
+             · Gazebo：URDF→SDF 只输出 SDF 1.7，而 <mimic> 是 1.9 的元素 → 静默丢弃，
+               本来就没生效（gz-sim/DART 也无 mimic 实现）
+             · robot_state_publisher：只在 joint_states 缺该关节时才用 mimic 兜底；
+               现在 /joint_states 里两指都在 → 不影响
+           删掉后 hand 组的 active joints = {joint1, joint2}，两指由同一个 JTC 驱动。 -->
       <dynamics damping="0.3" />
     </joint>
   </xacro:macro>

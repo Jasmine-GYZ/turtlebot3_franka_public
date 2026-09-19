@@ -4,8 +4,16 @@
 
   - Only the FR3 arm is planned by MoveIt; the diff-drive base is driven by Nav2.
   - Planning frame == root link == base_footprint (no virtual joint).
-  - fr3_finger_joint2 is a URDF <mimic> of fr3_finger_joint1 and is NOT
-    part of any group (MoveIt handles the mimic automatically).
+  - ★ fr3_finger_joint2 IS part of the "hand" group (2026-09-18).
+    以前把它当成 URDF <mimic> 排除在 group 外，但 Gazebo 侧根本没有可用的 mimic：
+      · URDF→SDF 会静默丢掉 <mimic>（SDF 1.7 vs 1.9），gz-sim/DART 也无实现
+      · 在 ros2_control 层挂 mimic 参数可以让自由空间同步，但**一接触就失效**：
+        一指被物体挡住停在 0.030，另一指明明有 10mm 无阻挡行程却冻在 0.040 一步不走
+        （实测 gap 70.01mm = 单侧碰到，没夹住）
+    结论：两指必须各自独立伺服。放进同一个 group 后，抓取代码里
+    `for (jname : jmg->getActiveJointModelNames()) close_goal[jname] = ...`
+    会自动给两指设同一目标，接触时各指停在物体两侧 → 真正夹紧
+    （实测 60mm 方块：j1=0.03001 j2=0.03003 gap=60.04mm ✓）。
 -->
 <robot name="turtlebot3_manipulation">
 
@@ -15,10 +23,16 @@
     <chain base_link="base_link" tip_link="fr3_link8" />
   </group>
 
+  <!-- ★ 只列两个 <joint>，**不列 <link>**（2026-09-18）。
+       原来写的是 <link name="fr3_hand"/> + <link name="fr3_rightfinger"/> + joint1，
+       MoveIt 对"按 link 定义"的组会**忽略显式 <joint> 表**、自己从 link 推关节，
+       推出来的 active joints 只有 fr3_finger_joint1 ✗（实测 planned_trajectory 里
+       只有 1 个关节名）。只列 joint 才是显式的、可预期的写法 ✓
+       另注：光删 link 还不够 —— URDF 里 joint2 挂着 <mimic>，MoveIt 会把 mimic 关节
+       当 passive 剔除。两者都修掉后 hand 组的 active joints 才是 {joint1, joint2}。 -->
   <group name="hand">
-    <link name="fr3_hand" />
-    <link name="fr3_rightfinger" />
     <joint name="fr3_finger_joint1" />
+    <joint name="fr3_finger_joint2" />
   </group>
 
   <!-- ══════════════ GROUP STATES ══════════════ -->
@@ -34,12 +48,19 @@
     <joint name="fr3_joint7" value="0.7853981634" />
   </group_state>
 
+  <!-- 开爪只到 0.038 而不是 URDF 上限 0.04：gz-sim Fortress 下 prismatic 关节
+       越过上限会永久卡死（详见 ros2_control xacro 里的长注释）。开口 76mm，
+       最宽目标（罐头直径约 66mm）仍有余量。 -->
   <group_state name="open" group="hand">
-    <joint name="fr3_finger_joint1" value="0.04" />
+    <joint name="fr3_finger_joint1" value="0.038" />
+    <joint name="fr3_finger_joint2" value="0.038" />
   </group_state>
 
+  <!-- 合爪只到 0.002 而非 0.0：同上是 Fortress 越下限卡死，且物体识别失败
+       （span<=0）时抓取代码会回退到这个命名状态，原来正是 0.0 → 会把 j1 锁死。 -->
   <group_state name="close" group="hand">
-    <joint name="fr3_finger_joint1" value="0.0" />
+    <joint name="fr3_finger_joint1" value="0.002" />
+    <joint name="fr3_finger_joint2" value="0.002" />
   </group_state>
 
   <!-- ══════════════ END EFFECTOR ══════════════ -->

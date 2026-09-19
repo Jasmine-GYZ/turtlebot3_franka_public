@@ -168,7 +168,10 @@ class DetectGraspTargetNode(Node):
         # auto：先按队友默认（4 类 + 复核）跑一次；结果里【没有可抓类别】时，
         #       再用"全类别 + 跳过复核"跑第二次（召回优先）
         # always / never 可强制。跳过复核的代价见文件末尾说明。
-        self.declare_parameter("grasp_mode", "auto")        # auto | always | never
+        # ★ 默认 always（2026-09-18）：phase2 抓取和 phase1 计数是两码事 ——
+        #   计数只看 4 类，抓取要认全 objects.yaml 18 类。auto 的"先 4 类试探"会让
+        #   抓取阶段借用计数词表，且残留"假 apple 封掉 18 类"的风险，直接默认 18 类。
+        self.declare_parameter("grasp_mode", "always")      # auto | always | never
         self.declare_parameter("size_check", True)          # 用实测尺寸核对类别（防误标）
         self.declare_parameter("size_ratio_lo", 0.7)        # 实测/期望 下限
         self.declare_parameter("size_ratio_hi", 1.4)        # 实测/期望 上限（按对角线算）
@@ -739,15 +742,44 @@ class DetectGraspTargetNode(Node):
             want_pre = [c for c in (request.class_ids or []) if c in self.catalog]
             graspable = [c for c, v in self.catalog.items() if v["graspable"]]
 
-            # ① 第 1 帧走队友默认（4 类 + 复核），用它决定要不要切抓取模式
-            t0 = time.time()
-            f0 = _frame(None, True)
-            self.get_logger().info("第 1/{} 帧（默认 4 类+复核）: {}（{:.1f}s）".format(
-                N, {k: round(v[0], 2) for k, v in f0.items()}, time.time() - t0))
+            # ① 第 1 帧走队友默认（4 类 + 复核），用它决定要不要切抓取模式。
+            #   只有「auto 且没点名」需要这轮试探；「never」时它本身就是最终结果。
+            #   always / auto+点名 时 4 类探测纯属白跑（还打误导日志），直接跳过。
+            need_f0 = (self.grasp_mode == "never"
+                       or (self.grasp_mode == "auto" and not want_pre))
+            f0 = None
+            f0_ok = set()
+            if need_f0:
+                t0 = time.time()
+                f0 = _frame(None, True)
+                self.get_logger().info("第 1/{} 帧（默认 4 类+复核）: {}（{:.1f}s）".format(
+                    N, {k: round(v[0], 2) for k, v in f0.items()}, time.time() - t0))
+
+                # ★ 判据只用【过了尺寸/高度核对】的第 1 帧候选（2026-09-18 现场修）
+                #   原来用未核对的原始 f0：只要那 4 类里报出一个**在可夹表里**的类就判"不必切"
+                #   ⇒ 一个 18 mm 的假 apple（0.55）就能封掉整个 18 类词表
+                #   （apple / coke can / banana 都在可夹 11 类里，4 类里只有碗不可夹）
+                #   ⇒ tomato_soup_can / potted_meat_can / sugar_box 一次都没被搜过
+                #   ⇒ 那个假 apple 随后被尺寸核对丢弃（这道校验是对的）⇒ 0 候选 ⇒ Phase 2 直接结束
+                #   ⇒ 现在：注定要被丢掉的误检不再有封杀权，照常切 18 类 ✓
+                def _f0_viable(c, d):
+                    """f0 里的候选能不能真当抓取目标：掩码有点 + 尺寸/高度核对都过。
+                    （这里不打印逐项告警，避免和 ④ 的正式核对重复刷屏）"""
+                    got0 = self._mask_points_cam(d.get("mask"), depth, info_msg.k)
+                    if got0 is None:
+                        return False
+                    return bool(self._size_ok(c, got0[0])[0]
+                                and self._height_ok(c, got0[0], tf)[0])
+
+                f0_ok = {c for c, (_, d) in f0.items() if c in graspable and _f0_viable(c, d)}
+                if f0_ok != {c for c in f0 if c in graspable}:
+                    self.get_logger().info("  第 1 帧可抓候选里过了尺寸/高度核对的: {}".format(
+                        sorted(f0_ok) or "无"))
 
             grasp_mode_on = (self.grasp_mode == "always"
                              or (self.grasp_mode == "auto"
-                                 and not any(c in graspable for c in f0)))
+                                 # ★ 调用方点名了类别 ⇒ 无条件用它的窄词表（--classes 曾名不副实）
+                                 and (bool(want_pre) or not f0_ok)))
             if grasp_mode_on:
                 if 0 < len(want_pre) <= 6:
                     prompt_use, mode_txt = (" . ".join(c.replace("_", " ") for c in want_pre) + " .",
@@ -755,8 +787,13 @@ class DetectGraspTargetNode(Node):
                 else:
                     prompt_use, mode_txt = (self.grasp_prompt,
                                             "抓取模式(全 {} 类, 闭集复核)".format(len(self.catalog)))
-                self.get_logger().warn("默认词表里没有可抓目标 → {} ".format(mode_txt)
-                                       + "（召回优先；误检靠多帧投票 + 尺寸核对 + 窄词表复核压下去）")
+                if self.grasp_mode != "auto":
+                    self.get_logger().info("抓取模式={} → {}".format(self.grasp_mode, mode_txt))
+                elif want_pre:
+                    self.get_logger().info("调用方指定抓取类别 → {}".format(mode_txt))
+                else:
+                    self.get_logger().warn("默认词表里没有可抓目标 → {} ".format(mode_txt)
+                                           + "（召回优先；误检靠多帧投票 + 尺寸核对 + 窄词表复核压下去）")
                 frames = [_frame(prompt_use, True)]           # 第 1 帧用新 prompt 重跑（复核开着）
             else:
                 prompt_use, mode_txt = None, "默认(4 类 + 复核)"

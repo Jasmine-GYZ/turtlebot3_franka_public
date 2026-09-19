@@ -184,14 +184,72 @@ https://github.com/ros-controls/ros2_control_demos/blob/foxy/ros2_control_demo_d
         </state_interface>
       </joint>
 
-      <!-- FR3 finger (only joint1; joint2 is URDF mimic handled by Gazebo physics) -->
+      <!-- ══════════ FR3 夹爪（两指，各自独立受控）══════════
+           ★ 2026-09-18 起**彻底不用 mimic**，两个手指各自是一个普通受控关节，
+             由同一个 JointTrajectoryController（gripper_controller）驱动。
+
+           ■ 为什么不用 URDF 的 <mimic>：
+             URDF→SDF 只输出 SDF 1.7，而 <mimic> 是 1.9 的元素 → **静默丢弃**
+             （`gz sdf -p` 零报错、joint2 照旧存在但 mimic 没了），gz-sim/DART 也无实现。
+             后果（09-17 实测）：joint2 成完全自由被动关节，只有 joint1 走全程，
+             两指不对称、夹持中心横移最多 20mm（容差只有 ±6.5mm）。
+
+           ■ 为什么连 gz_ros2_control 的 mimic 也不用（09-18 实测，这是关键）：
+             在 ros2_control 层挂 `_mimic`+`mimic`+`multiplier` 确实能让两指在
+             **自由空间**同步（日志 "Joint 'fr3_finger_joint2'is mimicking joint
+             'fr3_finger_joint1' with multiplier: 1"，80mm→0mm 约 0.75s），
+             但**一接触实物就失效**——实测 60mm 方块：
+               j1 被方块挡住停在 0.030，j2 明明还有 ~10mm 完全无障碍的行程，
+               却冻在 0.040 一步不走 → gap 70mm = 只碰到一侧，根本没夹住。
+             给它加一个控制器去"认领"命令接口也没用：mimic 关节的命令接口在
+             resource_manager 里被改名成 `<原名>_mimic`（/joint_states 里可看到
+             fr3_finger_joint2_mimic、而且 fr3_finger_joint2 整个消失），
+             且硬件 mimic 在 `write()` 里最后执行、会覆盖控制器的命令。
+             （controller_manager 每周期顺序：read() → 控制器 update() → write() 硬件）
+
+           ■ 现在的做法：两指都交给 gripper_controller（JTC）直接驱动，
+             MTC 的 MoveTo("open"/"close") 经 moveit_controllers.yaml 下发两指轨迹，
+             各指独立伺服、各自停在物体两侧。同一个 60mm 方块实测：
+               j1=0.03001 j2=0.03003 gap=60.04mm，JTC 返回 SUCCEEDED ✓
+             SRDF 的 hand group 里必须同时包含 fr3_finger_joint1/2，抓取代码
+             `for (jname : jmg->getActiveJointModelNames()) close_goal[jname] = ...`
+             才会自动给两指设同一目标。
+
+           ■ 限位上下都留 2mm 裕量（command min/max = 0.002/0.038，而非 URDF 的 0/0.04）：
+             gz-sim Fortress 的已知 bug：prismatic 关节越过 URDF 限位后**永久卡死**，
+             任何命令都不再响应（gz_ros2_control #192/#165，Harmonic 才修）。
+             09-18 实测，上下限各踩中一次：
+               · 上限：出生后立即命令到 0.04 → j2 死锁在 0.04000，连发 0.0 都纹丝不动；
+                 而抓取流程第一步恰恰就是 "open hand"（SRDF 的 open 状态原为 0.04）。
+               · 下限：连续开合，合到 0.0 后发 0.038 → j1 死锁在 0.00000、只剩 j2 能走
+                 （error_code -5）。而 pick_and_place.cpp 在物体识别失败（span<=0）时会
+                 回退到 SRDF 的 "close" 状态，原来正是 0.0 —— 一条真实的死锁路径。
+             两次都只能重启仿真才能恢复，所以命令范围收成 [0.002, 0.038]
+             （开口 4~76mm；最薄的比赛目标糖盒 38mm 对应关节 0.0145，远在范围内）。
+             run3 里 j1 停在 0.04016（越限 0.16mm）后死锁，也是同一个 bug。
+             宁可少开/少合 2mm，也不能让开合爪动作把夹爪锁死。
+             SRDF 的 open/close 状态、joint_limits.yaml 的 max/min_position
+             都已同步成 0.038/0.002，改一处要三处一起改。 -->
       <joint name="fr3_finger_joint1">
         <command_interface name="position">
-          <param name="min">0.0</param>
-          <param name="max">0.04</param>
+          <param name="min">0.002</param>
+          <param name="max">0.038</param>
         </command_interface>
         <state_interface name="position">
-          <param name="initial_value">0.04</param>
+          <param name="initial_value">0.038</param>
+        </state_interface>
+        <state_interface name="velocity">
+          <param name="initial_value">0.0</param>
+        </state_interface>
+      </joint>
+
+      <joint name="fr3_finger_joint2">
+        <command_interface name="position">
+          <param name="min">0.002</param>
+          <param name="max">0.038</param>
+        </command_interface>
+        <state_interface name="position">
+          <param name="initial_value">0.038</param>
         </state_interface>
         <state_interface name="velocity">
           <param name="initial_value">0.0</param>

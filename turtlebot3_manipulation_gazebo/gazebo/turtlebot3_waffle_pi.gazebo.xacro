@@ -57,6 +57,19 @@ https://github.com/ROBOTIS-GIT/turtlebot3/blob/kinetic-devel/turtlebot3_descript
     <material>Gazebo/FlatBlack</material>
   </gazebo>
 
+  <!-- ★ 2026-09-18 前万向轮的低摩擦块（照抄上面两个后万向轮）。
+       缺这块的话前轮会用 Gazebo 默认摩擦（≈1.0）→ 变成一块高摩擦刹车垫，
+       转向时跟车较劲，还不解决前倾。mu1/mu2=0.1 才是万向轮该有的行为。 -->
+  <gazebo reference="${prefix}caster_front_link">
+    <mu1>0.1</mu1>
+    <mu2>0.1</mu2>
+    <kp>1000000.0</kp>
+    <kd>100.0</kd>
+    <minDepth>0.001</minDepth>
+    <maxVel>1.0</maxVel>
+    <material>Gazebo/FlatBlack</material>
+  </gazebo>
+
   <gazebo reference="${prefix}imu_link">
     <material>Gazebo/Grey</material>
     <sensor type="imu" name="imu">

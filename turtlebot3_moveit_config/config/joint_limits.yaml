@@ -68,10 +68,21 @@ joint_limits:
     min_position: -3.0508
     max_position: 3.0508
 
+  # 两指现在都是 hand group 的普通关节（不再有 mimic），都要有限位。
+  # 上下限都留 2mm 裕量（0.002/0.038，URDF 是 0/0.04）：Fortress 下 prismatic
+  # 越过限位会永久卡死（上下限都实测踩中过），详见 ros2_control 的 xacro 注释。
   fr3_finger_joint1:
     has_velocity_limits: true
     max_velocity: 0.2
     has_acceleration_limits: false
     has_position_limits: true
-    min_position: 0.0
-    max_position: 0.04
+    min_position: 0.002
+    max_position: 0.038
+
+  fr3_finger_joint2:
+    has_velocity_limits: true
+    max_velocity: 0.2
+    has_acceleration_limits: false
+    has_position_limits: true
+    min_position: 0.002
+    max_position: 0.038

@@ -155,6 +155,38 @@ https://github.com/ROBOTIS-GIT/turtlebot3/blob/kinetic-devel/turtlebot3_descript
     </inertial>
   </link>
 
+  <!-- ★ 2026-09-18 前万向轮：把支撑多边形前边界从 x=0 推到 x=+0.18。
+       原来两个万向轮都在后方（x=-0.177），前方无支撑点，而 FR3 臂 19.6 kg、
+       质心高 0.87 m（底盘才 1.55 kg）→ 向前伸臂时整车绕驱动轮前倾。
+       实测：臂收回 pitch=-0.15°，伸到抓取位 pitch=+11.55°（Δ=11.7°）。
+       后果：base_footprint 随底盘一起转，而视觉/creep 是在臂收回（pitch≈0）
+       时测的目标点，MTC 却在臂伸出（pitch=11.7°）时执行 → 指令点
+       base(0.432,-0.125,0.895) 实际落到世界 (2.577,1.804,0.794)，罐头在
+       (2.575,2.000,0.780) → 末端前冲 0.196 m，正好是抓取撞飞物体的偏差。
+       几何与底面高度照抄后万向轮（x=-0.177 那两个），保证同一接地平面。 -->
+  <joint name="${prefix}caster_front_joint" type="fixed">
+    <parent link="${prefix}base_link"/>
+    <child link="${prefix}caster_front_link"/>
+    <origin xyz="0.18 0.0 -0.004" rpy="-1.57 0 0"/>
+  </joint>
+
+  <link name="${prefix}caster_front_link">
+    <collision>
+      <origin xyz="0 0.001 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.030 0.009 0.020"/>
+      </geometry>
+    </collision>
+
+    <inertial>
+      <origin xyz="0 0 0" />
+      <mass value="0.005" />
+      <inertia ixx="0.001" ixy="0.0" ixz="0.0"
+               iyy="0.001" iyz="0.0"
+               izz="0.001" />
+    </inertial>
+  </link>
+
   <joint name="${prefix}imu_joint" type="fixed">
     <parent link="${prefix}base_link"/>
     <child link="${prefix}imu_link"/>

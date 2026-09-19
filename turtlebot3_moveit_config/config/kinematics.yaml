@@ -9,4 +9,5 @@ arm:
   kinematics_solver_timeout: 0.05
   kinematics_solver_attempts: 3
 
-# hand is a single prismatic joint driven by GripperCommand; no IK solver needed.
+# hand 是两个 prismatic 手指（fr3_finger_joint1/2），由 gripper_controller（JTC）驱动，
+# 不是运动学链，无需 IK 求解器。

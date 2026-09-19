@@ -14,8 +14,10 @@ controller_manager:
     arm_controller:
       type: joint_trajectory_controller/JointTrajectoryController
 
+    # 两指都归它管（见文件末尾说明）。GripperActionController 是单关节的，
+    # 没法驱动 fr3_finger_joint2，而 Gazebo 的 mimic 一接触就失效，故改用 JTC。
     gripper_controller:
-      type: position_controllers/GripperActionController
+      type: joint_trajectory_controller/JointTrajectoryController
 
 diff_drive_controller:
   ros__parameters:
@@ -108,6 +110,39 @@ arm_controller:
       stopped_velocity_tolerance: 0.01 # Defaults to 0.01
       goal_time: 0.0 # Defaults to 0.0 (start immediately)
 
+# ═══════════ 夹爪（两指，一个 JTC 全管）═══════════
+# 2026-09-18 起 Gazebo 侧彻底不用 mimic（原因见 turtlebot3_manipulation.srdf 头部），
+# 两个手指都由这个 JointTrajectoryController 直接驱动。MTC 的 MoveTo("open"/"close")
+# 会经 moveit_controllers.yaml 下发两指轨迹，各指独立伺服 —— 接触时各自停在物体两侧，
+# 这才是真正的夹持（实测 60mm 方块：gap 60.04mm ✓；用 mimic 时只能到 70.01mm ✗）。
+#
+# constraints 必须放宽：抓取代码把目标设成「物体窄边/2 − close_hand_squeeze」，
+# 手指一碰到物体就天然差这么多（当前 0.0045 m），按 JTC 默认的严格容差会被判失败。
 gripper_controller:
   ros__parameters:
-    joint: fr3_finger_joint1
+    joints:
+      - fr3_finger_joint1
+      - fr3_finger_joint2
+
+    command_interfaces:
+      - position
+
+    state_interfaces:
+      - position
+      - velocity
+
+    state_publish_rate: 200.0
+    action_monitor_rate: 20.0
+
+    allow_partial_joints_goal: false
+    open_loop_control: true
+    allow_integration_in_goal_trajectories: true
+
+    constraints:
+      stopped_velocity_tolerance: 0.1
+      goal_time: 1.0
+      # 每指允许 20mm 的落点误差：手指被物体挡住时的残差 ≈ close_hand_squeeze（4.5mm）
+      fr3_finger_joint1:
+        goal: 0.02
+      fr3_finger_joint2:
+        goal: 0.02

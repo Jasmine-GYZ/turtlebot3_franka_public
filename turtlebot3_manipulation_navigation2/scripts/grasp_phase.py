@@ -119,6 +119,33 @@ CREEP_KV, CREEP_KW = 1.2, 1.5
 CREEP_SPIN_BEARING = 0.35
 CREEP_TIMEOUT = 45.0        # s（视觉每次 1~5 s，收紧容差后轮数变多，预算放宽）
 CREEP_DT = 0.10
+
+# ── ★ 抓取点【自检】阈值（2026-09-18 实跑两次对比定出来的）──────────────
+# 底盘在"微调收敛"和"抓取点重拍"之间**没动过**，所以这两次对同一个静止物体的
+# 测量本该一致；不一致就说明至少有一次是错的 → 不能照着它下爪。
+# ★ 必须【分方向】判，看总差异大小是判不出来的 —— 两次实跑的实测：
+#     成功那次: 微调(0.377,+0.000) vs 重拍(0.402,+0.000) → 差 **25 mm**，但全在【前向】
+#     失败那次: 微调(0.407,-0.000) vs 重拍(0.412,-0.019) → 差 20 mm，其中【横向 19 mm】
+#   前向差只意味着"多伸 2 cm"，罐子仍在两指之间 ✓ 能夹住；
+#   横向差直接决定两指能不能合到物体 —— 失败那次两指合到 57.0 mm **空合**（TF 间隙
+#   76→57 全程无阻挡，而罐子窄边 66 mm），就是横向偏了 19 mm 造成的 ✗
+#   ⇒ 横向容差必须严（按夹持窗口 ±6.5 mm 的量级给），前向可以松。
+CONSIST_TOL_Y = 0.012       # 横向（两指闭合方向）容差 —— 严
+# ★ 距离容差必须**松于** `_nudge` 的触发线（0.030），否则自检会抢在 nudge 之前
+#   把"其实能补回来"的距离差直接拒掉 ✗ —— 距离差有 `_nudge` 专门负责（它本来就是
+#   干这个的：驱动底盘把物体重新推到 standoff）。自检只在距离差**大到 nudge 也救不回**
+#   时才拦。
+CONSIST_TOL_R = 0.060       # 前向/距离容差 —— 松（> nudge 的 0.030）
+CONSIST_TRIES = 2           # 自检不过就重拍，最多再拍 2 次
+# ★ 重拍**救不回来**（2026-09-18 实跑证明）：三次重拍返回的是逐位相同的
+#   base(+0.432,-0.025) conf=0.52 —— 这个视觉是**确定性的**，不是逐帧随机的。
+#   重拍只值 15 秒的确认（"它确实稳定地这么认为"），不能指望它换个答案。
+#   ⇒ 自检不过的实际含义是【这一轮的观测/定位本身有问题】，应当重来一轮，
+#     而不是指望同一位置重拍。保留 CONSIST_TRIES>0 只为区分"偶发"和"稳定"。
+MIN_GRASP_CONF = 0.70       # 置信度【仅提示】阈值：低于它只在日志里提一句，**不拒抓**
+# ★ 别把它当闸门用 —— 四次实跑：夹住 0.89；空合 0.90 和 0.53（还有一次没记 conf）。
+#   置信度和成败没有对应关系，而本布置正常检测就落在 0.52~0.62。
+
 CMD_VEL_TOPIC = "/cmd_vel"  # navigation.launch.py 的 cmd_vel_relay 转到 /diff_controller
 
 # ── 服务与超时 ───────────────────────────────────────────────────
@@ -140,7 +167,10 @@ MIN_CONFIDENCE = 0.35           # 低于它不当作候选（开集检测在 1 m
                                 # 定 0.50 会把真目标全部拒掉 ✗；误检靠尺寸核对 +
                                 # 支撑面校验 + 多帧投票压住，见 docs/handoff/HANDOFF_vision_grasp_interface.md）
 REACH_MIN, REACH_MAX = 0.10, 0.75
-MAX_TARGET_TRIES = 2            # 抓失败换目标的次数（规则书：四个里任选一个）
+MAX_TARGET_TRIES = 4            # 抓失败换目标的次数（规则书：四个里任选一个）。
+                                # ★ 2026-09-18：按【抓取清单】逐个试、四个都试完。
+                                #   原来是 2 —— 等于第一好抓的物体没成就只剩一次机会就收场 ✗
+SAME_TARGET_RETRY = 2           # 同一目标"两指没夹到(空合/没合到)"后重新拍照识别重新抓的上限
 
 
 def clamp(v, lo, hi):
@@ -380,12 +410,17 @@ class GraspPhase:
         self.last_targets = []       # 最近一次检测结果（给上层/证据用）
         # ★ 手指关节实测位置：判断"到底有没有夹到物体"的唯一直接证据
         #   （仿真里合爪是位置控制：夹到物体就会停在物体宽度处、到不了指令值 ✓）
-        self._finger_q = None
+        self._finger_q = None        # joint1（历史用法，= 2×它的"两指间距"只在对称时成立）
+        self._finger_q2 = None       # joint2（2026-09-18 起两指独立驱动，必须分开看）
         self.object_sizes = load_object_sizes()
         self.close_squeeze = load_close_squeeze()
         # ★ 注意：GraspPhase 不是 Node（只是拿着调用方的 node）→ 必须用 self.node.* ✗
         self.node.create_subscription(JointState, "/joint_states", self._on_joint_state, 10)
         self._track = {}             # 类别 → (时间, odom 坐标)：creep 的里程计跟踪基准
+        # ★ 抓取清单（2026-09-18）：开局把桌上可夹物体的【顺序 + map 初始位置】冻结一次，
+        #   之后按序消耗；"已放弃"按【实例号】记（不再按 class_id，同类物体不连坐 ✓）
+        self._plan = None
+        self._plan_rebuilt = False   # 近看漏检后是否已重建过清单（只重建一次）
         # 能夹什么以 objects.yaml 为准（读不到才退回代码里的兜底名单）
         self.graspable = load_graspable()
         if self.graspable:
@@ -411,10 +446,14 @@ class GraspPhase:
         return True if self.nav_map is None else self.nav_map.free(x, y, clearance)
 
     def _on_joint_state(self, msg):
+        # ★ 2026-09-18：两指自独立驱动（mimic 已弃用）→ 两个都要采，不能 break ✗
+        #   成功抓取实测：joint1=0.0285、joint2=0.0372（和 = 0.0657 ≈ 罐头窄边 0.066 ✓）
+        #   —— 两指可以不对称，所以"2×joint1"不再等于真实间隙。
         for name, pos in zip(msg.name, msg.position):
             if name == "fr3_finger_joint1":
                 self._finger_q = float(pos)
-                break
+            elif name == "fr3_finger_joint2":
+                self._finger_q2 = float(pos)
 
     def tcp_pose_base(self):
         """指尖平面 fr3_hand_tcp 在当前 base_footprint 系里的 (x, y, z)；取不到返回 None。
@@ -436,11 +475,11 @@ class GraspPhase:
     def finger_gap_mm(self):
         """两指【真实间距】(mm)：直接量 fr3_leftfinger 与 fr3_rightfinger 两个帧的距离。
 
-        ★ 为什么不能只看 /joint_states：URDF 里 fr3_finger_joint2 是 `<mimic>`，
-          而 **Fortress(gz-sim 6.18) 不支持 mimic**（libignition-gazebo6 里没有任何
-          mimic 代码；mimic 是 SDF 1.10 / Garden 才有的）→ 右手手指在仿真里没有驱动 ✗
-          这时 /joint_states 只报 joint1（左手）→ 看起来"合爪正常"，实际只有一根手指在动 ✗
-          量两个手指帧的距离才能看到真实间隙 ✓（TF 是机器人自己的运动学，不是真值）
+        ★ 这是合爪判据的**主证据**（2026-09-18 起）：
+          mimic 已弃用、joint2 独立驱动 → 两指**可以不对称**（实测成功抓取
+          joint1=0.0285 / joint2=0.0372），所以 `2×joint1` 不再等于真实间隙 ✗
+          只有量两个手指帧的距离才是真正"两指之间有多宽" ✓
+          （TF 是机器人自己的运动学，不是 gz 真值）
         """
         if self.tf_buffer is None:
             return None
@@ -452,8 +491,12 @@ class GraspPhase:
             return None
 
     def fingers_mm(self):
-        """两指间距（mm）= 2 × 关节值；读不到返回 None。"""
-        return None if self._finger_q is None else self._finger_q * 2000.0
+        """两指间距（mm）：转调 finger_gap_mm（TF 实测），读不到返回 None。
+
+        ⚠️ 以前是 `2 × joint1` —— mimic 弃用后两指可不对称，那个式子**不再成立** ✗
+           任何人想用"两指间距"都请走这条（= 真实测量），不要自己算 2×关节值。
+        """
+        return self.finger_gap_mm()
 
     # ══════════════ 等待原语（绝不 spin ✗）══════════════
     def sleep(self, seconds):
@@ -596,8 +639,12 @@ class GraspPhase:
                 and abs(p_map[1] - TABLE_CENTER_XYZ[1]) <= TABLE_HALF_Y + margin)
 
     def choose_target(self, targets, exclude=(), check_reach=True, robot_pose=None,
-                      on_support_only=True):
+                      on_support_only=True, rank_all=False):
         """返回 (target, obstacles, reason)。exclude 里放已经试过且失败的类别。
+
+        rank_all=True → 返回 (全排序候选 list, [], reason)，供建【抓取清单】用：
+        排序键与选最优那个完全一致，所以清单第一项就是原来会选中的目标 ✓
+
 
         check_reach：**观察位必须传 False** ✗ —— 观察位离桌 1.15 m，桌上任何物体
         到臂基座都在 1.1~1.3 m，套 [0.10, 0.75] 会把所有候选全拒掉
@@ -617,7 +664,10 @@ class GraspPhase:
                                   .format(cls))
                     self._logged_nongrasp = getattr(self, "_logged_nongrasp", set()) | {cls}
                 continue
-            if t.confidence < self.min_confidence:
+            # ★ 建清单（rank_all）时不按置信度剔除：清单是"计划"不是"决策" ✗
+            #   置信度闸门在每次抓取前照样会过（低置信真目标 17:18 那次就是被它
+            #   卡死的），这里先剔掉等于让它连进清单、连被兜底的机会都没有。
+            if t.confidence < self.min_confidence and not rank_all:
                 self.log.info("  跳过 {}：置信度 {:.2f} < {:.2f}".format(
                     cls, t.confidence, self.min_confidence))
                 continue
@@ -641,12 +691,90 @@ class GraspPhase:
         if not cands:
             return None, [], "没有可夹且可达的目标"
         cands.sort(key=lambda c: c[:4])
+        if rank_all:
+            return [c[4] for c in cands], [], "全排序 {} 个".format(len(cands))
         _, _, neg_gap, _, best, bi = cands[0]
         obstacles = [t for j, t in enumerate(targets) if j != bi]
         reason = "\"{}\" / 距臂基座 {:.3f} m / 与邻居最近 {:.3f} m / conf {:.2f}".format(
             best.class_id, math.hypot(best.point.x - ARM_BASE_X, best.point.y),
             -neg_gap, best.confidence)
         return best, obstacles, reason
+
+    # ══════════════ ②b 抓取清单（顺序 + 初始位置快照）══════════════
+    def _build_plan(self, targets, rp, rp_od):
+        """把桌上可夹物体冻结成一份抓取清单：顺序 + 各自 map 初始位置。
+
+        ★ 为什么要冻结（2026-09-18）：原来每轮都重新 fetch_targets + choose_target，
+          顺序会跟着当次测量漂（排序键里含 point.x 与邻居间隙）；而且"已放弃"按
+          class_id 记 —— 桌上同类摆两个就会互相连坐 ✗。冻结成清单后顺序只定一次，
+          放弃按【实例号】记 ✓，且"第一好抓的失败了就直接去下一个"变得显式可控。
+        ★ 位置只做兜底：实际站位/下爪仍走"站位重测 + 抓取点重拍"（精度更高），
+          清单里的位置只在视觉彻底认不出时才拿来顶一下。
+        """
+        ranked, _, _ = self.choose_target(targets, check_reach=False,
+                                          robot_pose=rp, rank_all=True)
+        plan = []
+        for i, t in enumerate(ranked):
+            plan.append({"idx": i, "class": t.class_id,
+                         "xy": self._to_map((t.point.x, t.point.y), rp_od),
+                         "conf": float(t.confidence)})
+        return plan
+
+    def _rebuild_plan(self, targets, rp=None):
+        """近看那一趟看得更全 → 重建一次清单（观察位漏检的物体补进来）。只重建一次 ✓"""
+        if self._plan_rebuilt or not targets:
+            return
+        rp = rp or self._robot_map_pose()
+        if rp is None:
+            return
+        od = self._robot_odom_pose() or rp
+        self._plan = self._build_plan(targets, rp, od)
+        self._plan_rebuilt = True
+        self.log.info("抓取清单已重建：{}".format(self._plan_text(self._plan)))
+
+    @staticmethod
+    def _plan_text(plan):
+        """清单的日志文本（顺序 + 档位 + 置信度 + 初始 map 位置）。"""
+        rows = []
+        for p in plan:
+            tier = next((k for k, row in enumerate(TARGET_TIERS) if p["class"] in row),
+                        len(TARGET_TIERS))
+            rows.append("P{} {}(tier{} conf{:.2f} map {:.3f},{:.3f})".format(
+                p["idx"] + 1, p["class"], tier, p["conf"], p["xy"][0], p["xy"][1]))
+        return " → ".join(rows)
+
+    @staticmethod
+    def _next_planned(plan, abandoned):
+        """清单里下一个未放弃的条目 → (条目, 实例号)；全试完 → (None, None)。"""
+        for p in plan:
+            if p["idx"] not in abandoned:
+                return p, p["idx"]
+        return None, None
+
+    def _plan_xy(self, class_id):
+        """清单里该物体的初始 map 位置（认不出时的最后兜底）。"""
+        for p in (self._plan or []):
+            if p["class"] == class_id:
+                return p["xy"]
+        return None
+
+    def _pick_fresh(self, targets, planned, rp):
+        """清单条目 → 当前视觉里同类的那个检测；认不出返回 None。
+
+        同类有多个时取离【清单初始位置】最近的那个 —— 清单按实例排，而视觉只给
+        类别，只能靠位置认回是哪一个。
+        """
+        same = [t for t in targets if t.class_id == planned["class"]]
+        if not same:
+            return None
+        ox, oy = planned["xy"]       # ★ 清单坐标是 **odom 系**（与 _track/_final_map 同源）
+        rod = self._robot_odom_pose() or rp    # ⇒ 比较时也必须用 odom 位姿，混用 map 会错 ✗
+
+        def _d(t):
+            m = self._to_map((t.point.x, t.point.y), rod)
+            return math.hypot(m[0] - ox, m[1] - oy)
+
+        return min(same, key=_d)
 
     # ══════════════ ③ 站位解算（目标 map 位置 → 停车点）══════════════
     @staticmethod
@@ -1033,6 +1161,26 @@ class GraspPhase:
         rp = self._robot_map_pose()
         return rp if rp is not None else self._robot_odom_pose()
 
+    def _track_in_map(self, rp_m, tr):
+        """把 _track 里的跟踪点换算到 `rp_m` 所在的帧（tr 为 None 时返回 None）。
+
+        ★ 2026-09-18 修 bug：`_remember()` 存的是 `_to_map(p, rp_od)` → `tr[1]` 是
+          **odom 系**点；而 `_fresh_target()` 用 `_pose_for_match()`（**优先 AMCL/map**）
+          把检测点换算成 **map 系**点，两边帧不一致 —— 直接相减等于把 odom↔map 的
+          定位偏移（实测 0.16~0.6 m）当成"物体自己移动了"，于是
+          `离跟踪位置超过 0.35 m → 不采信` 恒成立，每次都退回"观察位估计 +
+          里程计外推"的降级路径（实跑日志里能看到这条 WARN）。
+        `_pose_for_match()` 退回 odom 时本函数自动退化成恒等映射（偏移 0）✓
+        做法：两帧只差一个平移 —— 两边 yaw 都以各自原点为零、且是同一底盘朝向，
+          用当前两帧的底盘位姿之差补上即可。
+        """
+        if tr is None or rp_m is None:
+            return None
+        rp_od = self._robot_odom_pose()
+        if rp_od is None:
+            return None
+        return (tr[1][0] + rp_m[0] - rp_od[0], tr[1][1] + rp_m[1] - rp_od[1])
+
     def _fresh_target(self, class_id, match_radius=0.35):
         """在【抓取点上】重新量一次目标 → (target, obstacles, source)。
 
@@ -1053,21 +1201,24 @@ class GraspPhase:
         same = [t for t in tg if t.class_id == class_id]
         tr = self._track.get(class_id)
         rp_m = self._pose_for_match()
+        # ★ 跟踪点是 odom 系的，比较前先换算到 rp_m 所在帧（否则判据恒不成立，
+        #   见 _track_in_map 的说明）
+        tp = self._track_in_map(rp_m, tr)
         # ★ 同名但位置离谱的检测不要（远处同类别物体 / 误检）：与上次跟踪位置比一比，
         #   超过 match_radius 就当成"不是同一个物体"（爬行期间物体不可能移动 35 cm）
         if same and tr is not None:
-            if rp_m is not None:
+            if tp is not None:
                 near = []
                 for t in same:
                     q = self._to_map((t.point.x, t.point.y), rp_m)
-                    if math.hypot(q[0] - tr[1][0], q[1] - tr[1][1]) <= match_radius:
+                    if math.hypot(q[0] - tp[0], q[1] - tp[1]) <= match_radius:
                         near.append(t)
                 if not near:
                     self.log.warn("  抓取点上认出的 {} 离跟踪位置超过 {:.2f} m → 不采信"
                                   .format(class_id, match_radius))
                 same = near
         if not same and tr is not None:
-            if rp_m is not None:
+            if tp is not None:
                 # ★ 顶替半径比 match_radius 紧得多（0.10 而不是 0.35）：
                 #   顶替本来只为救"开集标签逐帧抖"（同一只物体换了名字，位置只差几 mm），
                 #   放宽到 0.35 会把【旁边另一只物体】也拉进来 → 抓错东西 ✗
@@ -1077,7 +1228,7 @@ class GraspPhase:
                 best, bd = None, subst_r
                 for t in tg:
                     q = self._to_map((t.point.x, t.point.y), rp_m)
-                    d = math.hypot(q[0] - tr[1][0], q[1] - tr[1][1])
+                    d = math.hypot(q[0] - tp[0], q[1] - tp[1])
                     if d < bd:
                         best, bd = t, d
                 if best is not None:
@@ -1088,6 +1239,51 @@ class GraspPhase:
             return None, None, "none"
         best = max(same, key=lambda t: t.confidence)
         return best, [t for t in tg if t is not best], "vision"
+
+    def _target_suspect(self, tgt, conv_xy):
+        """抓取点【可信度】自检 → 返回 None（可信）或一句"为什么不可信"。
+
+        `conv_xy` = 微调收敛后、由里程计跟踪给出的物体位置（base 系），
+        必须在 `_remember()` **之前**取 —— `_remember()` 会把跟踪基准覆盖成刚测的
+        这个值，取晚了就变成"自己跟自己比"，校验恒成立 ✗
+
+        ★ 为什么要有这一步（2026-09-18 两次实跑）：底盘期间没动，两次测量本该一致。
+          失败那次 `_fresh_target()` 给出 base(+0.412,-0.019) conf=0.53，
+          而横向偏 19 mm 谁也没拦 —— 旧的安全网是
+          `abs(by) > 0.020`（差 1 mm 没触发）且另一路拿 `standoff`（预期距离）当参照，
+          而那次站位被外推得更远、预期值从 0.370 漂到 0.400，于是距离那路也没触发
+          → 直接照着偏掉的点抓 → 两指合空。
+        ★ 本函数不依赖任何"预期值"，只问一句：两次独立测量对得上吗？
+
+        ⚠️ 2026-09-18 四次跑汇总后要留个心眼：横向差把"夹住那次(0 mm)"和"空合那两次
+          (19/25 mm)"分开了，但 01:08 那次横向是 **0.000** 却照样空合 ⇒ **横向差不是
+          充分判据，过了它也不保证抓得住**。四次跑里真正和成败一一对应的是**伸多远**
+          （x≈0.375 夹住；0.411/0.412/0.436 全空合），而伸多远由 `standoff` 决定、
+          `standoff = 离桌沿 + 0.130`，`离桌沿` 又跟着 map 系物体估计漂（四次读到
+          0.240~0.300，物体其实没动）⇒ 下一轮要把"合爪位指尖的实际 y"记下来
+          （见 `call_grasp` 里 tcp_at_max 那段），才能分清是点偏了还是臂没走到位。
+        """
+        # ★ 置信度【不作为拒抓依据】（2026-09-18 四次实跑定的）——
+        #   夹住那次 conf=0.89，可空合的三次里有一次 conf=**0.90**（01:30）、
+        #   另两次 0.53。置信度和成败**毫无对应**，拿它当闸门只会误拦：
+        #   当前布置下正常检测本来就是 0.52~0.62，0.70 会把每一轮都拦死 ✗
+        #   ⇒ 只记录。真正有判别力的是下面的横向差，以及实跑暴露的"伸多远"。
+        if tgt.confidence < MIN_GRASP_CONF:
+            self.log.warn("  （提示）置信度 {:.2f} < {:.2f} —— 仅记录，不作为拒抓依据"
+                          .format(tgt.confidence, MIN_GRASP_CONF))
+        if conv_xy is None:
+            return None          # 拿不到里程计跟踪值 → 没法交叉验证，不拦（不假装能判）
+        dy = abs(tgt.point.y - conv_xy[1])
+        if dy > CONSIST_TOL_Y:
+            return ("横向差 {:.1f} mm > {:.0f} mm（现场重拍 y={:+.3f} vs 微调收敛 "
+                    "y={:+.3f}，底盘期间没动）→ 照这个点下爪两指会合空"
+                    .format(dy * 1000, CONSIST_TOL_Y * 1000, tgt.point.y, conv_xy[1]))
+        d_new = math.hypot(tgt.point.x, tgt.point.y)
+        d_old = math.hypot(conv_xy[0], conv_xy[1])
+        if abs(d_new - d_old) > CONSIST_TOL_R:
+            return ("距离差 {:.1f} mm > {:.0f} mm（现场重拍 {:.3f} vs 微调收敛 {:.3f}）"
+                    .format(abs(d_new - d_old) * 1000, CONSIST_TOL_R * 1000, d_new, d_old))
+        return None
 
     def _nudge(self, class_id, goal_d, rounds=25):
         """按【里程计跟踪】把物体推到 base(goal_d, 0)：补偿刚测出来的残差。
@@ -1118,7 +1314,7 @@ class GraspPhase:
         if not self.wait_client(self.grasp_client, 30.0):
             self.log.error("抓取服务 {} 不可用（grasp_service.launch.py 起了吗？）"
                            .format(GRASP_SERVICE))
-            return 0, 1, "grasp service unavailable"
+            return "unknown", 0, 1, "grasp service unavailable"
         req = GraspFixedObject.Request()
         req.target = target
         req.obstacles = obstacles
@@ -1139,13 +1335,21 @@ class GraspPhase:
         # ★ 记轨迹范围（min/max），不能只留"z 最小"的那一次 ✗：
         #   home 位姿的指尖 z(0.914) 比抓取位姿(0.9195) 还低 → 只留最小 z 会永远
         #   记成 home 位姿（实测踩过，害我误判"机械臂没到位" ✗）
-        tcp_xs, tcp_zs = [], []
+        tcp_xs, tcp_zs, tcp_ys = [], [], []
+        # ★ 只记 x/z 是**漏掉判别量**的。09-18 四次实跑：x 都执行到位（最远 x ≈ 抓取点 x）、
+        #   min z 三次只差 1 mm，可四次里三次空合、一次夹住 ⇒ 差别只可能在没被记录的 y 上。
+        #   所以要抓的是【合爪那一瞬指尖到底在哪】——那才是决定"罐子有没有在两指之间"的位姿。
+        #     到达位姿 ≈ 命令位姿 → 臂执行没问题，点本身就偏了（该查视觉/定位）
+        #     到达位姿 ≢ 命令位姿 → 臂没走到位（该查规划/控制/运动学）
+        tcp_at_max = [None]          # 轨迹 x 极值那次（= 抓取位，用于和"抓取点 x"对账）
+        tcp_at_close = [None]        # ★ 手指【一开始动】那一瞬的指尖位姿（下爪位的最直接证据）
         if gap0 is not None:
             self.log.info("  合爪前两指真实间距 = {:.1f} mm；指尖平面 base({:+.3f},{:+.3f},{:.3f})"
                           .format(gap0, tcp0[0], tcp0[1], tcp0[2]) if tcp0 else
                           "  合爪前两指真实间距 = {:.1f} mm".format(gap0))
         fut = self.grasp_client.call_async(req)
         qmin, qmax = self._finger_q, self._finger_q          # 夹持过程中采样
+        q2min, q2max = self._finger_q2, self._finger_q2      # joint2 单独采（两指独立驱动）
         gmin, gmax = gap0, gap0
         deadline = time.time() + GRASP_SERVICE_TIMEOUT
         while rclpy.ok() and not fut.done() and time.time() < deadline:
@@ -1153,6 +1357,10 @@ class GraspPhase:
             if q is not None:
                 qmin = q if qmin is None else min(qmin, q)
                 qmax = q if qmax is None else max(qmax, q)
+            q2 = self._finger_q2
+            if q2 is not None:
+                q2min = q2 if q2min is None else min(q2min, q2)
+                q2max = q2 if q2max is None else max(q2max, q2)
             g = self.finger_gap_mm()
             if g is not None:
                 gmin = g if gmin is None else min(gmin, g)
@@ -1161,52 +1369,94 @@ class GraspPhase:
             if tp is not None:
                 tcp_xs.append(tp[0])
                 tcp_zs.append(tp[2])
+                tcp_ys.append(tp[1])
+                if tcp_at_max[0] is None or tp[0] > tcp_at_max[0][0]:
+                    tcp_at_max[0] = tp
+            # ★ 手指刚开始动 = 合爪那一刻（MTC 是先到位再合爪），把这一瞬的指尖位姿钉住。
+            #   用 q0 做基准：它本来就是"合爪前的手指值"，之前赋值了却没用过。
+            if (tcp_at_close[0] is None and q0 is not None
+                    and self._finger_q is not None and abs(self._finger_q - q0) > 5e-4):
+                tcp_at_close[0] = tp if tp is not None else self.tcp_pose_base()
             time.sleep(0.1)
         if not fut.done():
             self.log.error("抓取服务超时（>{:.0f}s）".format(GRASP_SERVICE_TIMEOUT))
-            return 0, -1, "timeout"
-        # ★ 手指关节实测行程 → 直接判定"夹到了没有"
+            return "unknown", 0, -1, "timeout"
+        # ══════════ 合爪判据 ══════════
+        # ★ 2026-09-18 改用【TF 实测的两指真实间隙】当主判据，不再用 2×joint1 ✗
+        #   mimic 已弃用 → joint2 独立驱动 → 两指**可以不对称**，
+        #   "2×joint1" 不再等于真实间隙。实测成功抓取：
+        #     joint1 走到指令值 0.0285，joint2 被罐头顶住停在 0.0372，
+        #     和 = 0.0657 m ≈ 罐头窄边 0.0660 m ✓  → 两指把罐头夹住了
+        #   而旧判据拿 2×0.0285 = 57.0 mm 去比 66.0 mm → 每次成功都误报
+        #   "? 物体被挤走" + "✗ 两指不对称"，把真正的失败信号盖掉了 ✗
         if qmin is not None and qmax is not None and abs(qmax - qmin) > 1e-4:
-            gap = qmin * 2000.0
-            self.log.info("  合爪实测: 关节 起始 {:.4f} → 最终 {:.4f}（两指间距 {:.1f} mm）".format(
-                qmax, qmin, gap))
-            if span:
-                if qmin * 2.0 > span + 0.004:
-                    self.log.warn("  ✗ 手指停在 {:.1f} mm —— 比物体窄边 {:.1f} mm 还宽 "
-                                  "→ 没夹到物体（或夹到了别的东西）"
-                                  .format(gap, span * 1000))
-                elif qmin * 2.0 > span - 0.002:
-                    self.log.info("  ✓ 手指停在 {:.1f} mm ≈ 物体窄边 {:.1f} mm "
-                                  "→ 夹到了物体（接触即停）".format(gap, span * 1000))
-                else:
-                    self.log.warn("  ? 手指合到 {:.1f} mm，比物体窄边 {:.1f} mm 还小 "
-                                  "→ 物体被挤走 / 没在两指之间".format(gap, span * 1000))
+            self.log.info("  合爪实测: joint1 {:.4f}→{:.4f}  joint2 {}（2×joint1 = {:.1f} mm）"
+                          .format(qmax, qmin,
+                                  "{:.4f}→{:.4f}".format(q2max, q2min) if q2min is not None
+                                  else "未采到",
+                                  qmin * 2000.0))
         else:
             self.log.warn("  合爪实测: 没采到手指关节变化（/joint_states 没起来？）")
+        verdict = "unknown"      # ★ 三态判据：返回给调用方当成败主判据（res.success 会假报空合 ✗）
+        if gmin is not None and gmax is not None and abs(gmax - gmin) > 0.5:
+            self.log.info("  两指真实间距(TF): 起始 {:.1f} mm → 最小 {:.1f} mm".format(gmax, gmin))
+            if span:
+                if gmin > (span + 0.004) * 1000.0:
+                    verdict = "wide"
+                    self.log.warn("  ✗ 手指停在 {:.1f} mm —— 比物体窄边 {:.1f} mm 还宽 "
+                                  "→ 没夹到物体（或夹到了别的东西）"
+                                  .format(gmin, span * 1000))
+                elif gmin > (span - 0.002) * 1000.0:
+                    verdict = "gripped"
+                    self.log.info("  ✓ 手指停在 {:.1f} mm ≈ 物体窄边 {:.1f} mm "
+                                  "→ 夹到了物体（接触即停）".format(gmin, span * 1000))
+                else:
+                    verdict = "empty"
+                    self.log.warn("  ? 手指合到 {:.1f} mm，比物体窄边 {:.1f} mm 还小 "
+                                  "→ 物体被挤走 / 没在两指之间".format(gmin, span * 1000))
+            # ★ 自检：TF 真实间隙 vs /joint_states 两关节之和，应一致
+            #   （不一致 = /joint_states 与运动学对不上，比"两指对不对称"更值得报警）
+            if qmin is not None and q2min is not None:
+                s = (qmin + q2min) * 1000.0
+                if abs(gmin - s) > 8.0:
+                    self.log.warn("  ✗ 真实间隙 {:.1f} mm 与 joint1+joint2 = {:.1f} mm 不符 "
+                                  "→ /joint_states 与 TF 对不上".format(gmin, s))
+                else:
+                    self.log.info("  ✓ 与 joint1+joint2 自洽（{:.1f} mm ≈ {:.1f} mm）"
+                                  .format(gmin, s))
+        elif span:
+            self.log.warn("  两指真实间距(TF)没采到 → 无法判定是否夹住 ✗")
         if tcp_xs:
             self.log.info("  指尖轨迹(本次调用): x {:.3f}→{:.3f}（最远 {:.3f}）  z {:.3f}→{:.3f}"
                           "  ← 最远 x 应≈抓取点的 x ✓"
                           .format(min(tcp_xs), max(tcp_xs), max(tcp_xs),
                                   min(tcp_zs), max(tcp_zs)))
-        # ★ 两指真实间距：用来判断"两指是否对称合拢"以及"有没有夹到东西"
-        #   两指对称时：期望间隙 = 2 × joint1（URDF 里 joint2 是 joint1 的镜像 mimic ✓）
-        #   ← 这里原来写成 q + 40 mm（当成只有左手在动）→ 会误报 mimic 失效 ✗（实测踩过）
-        if gmin is not None and gmax is not None and abs(gmax - gmin) > 0.5:
-            self.log.info("  两指真实间距: 起始 {:.1f} mm → 最小 {:.1f} mm".format(gmax, gmin))
-            if qmin is not None:
-                expect = 2.0 * qmin * 1000.0       # 两指对称 = 2×关节值
-                if abs(gmin - expect) > 8.0:
-                    self.log.warn("  ✗ 真实间隙 {:.1f} mm 与「两指对称」应有的 {:.1f} mm 不符 "
-                                  "→ 两指不对称（mimic/装配有问题）".format(gmin, expect))
-                else:
-                    self.log.info("  ✓ 两指对称合拢（真实间隙 ≈ 2×关节值，mimic 正常）")
+            # ★★ 合爪那一瞬的指尖位姿 vs 命令位姿 —— 之前四次实跑缺的就是这一行。
+            #   ⚠️ 三个轴不能同等看待：
+            #     · x 已有一个约定（"最远 x 应≈抓取点 x"，四次都 ≈ 对上了 ✓）
+            #     · **z 有一个固定的上抬**（命令的 z 是"轴心∩支撑面"=桌面 0.780，
+            #        指尖实际在桌面上方 ~65 mm 处合爪，四次一致 0.844/0.845）→ 是约定，不是误差
+            #     · **y 从来没有基线** —— 而它正是"罐子有没有落在两指之间"的那个轴
+            #   ⇒ 先只记录三个差值，跑一次拿到基线；之后 y 的差值才有阈值可言。
+            tc = tcp_at_close[0] if tcp_at_close[0] is not None else tcp_at_max[0]
+            if tc is not None:
+                self.log.info("  合爪位指尖 base({:+.3f},{:+.3f},{:.3f}) vs 命令({:+.3f},{:+.3f},{:.3f})"
+                              " → 差 ({:+.1f},{:+.1f},{:+.1f}) mm"
+                              .format(tc[0], tc[1], tc[2], target.point.x, target.point.y,
+                                      target.point.z, (tc[0] - target.point.x) * 1000,
+                                      (tc[1] - target.point.y) * 1000,
+                                      (tc[2] - target.point.z) * 1000))
+                self.log.info("  本次 y 范围 {:+.3f}~{:+.3f}（合爪位取自{}）"
+                              .format(min(tcp_ys), max(tcp_ys),
+                                      "手指开始动那一瞬" if tcp_at_close[0] is not None
+                                      else "x 极值，没采到动指"))
         res = fut.result()
         if res is None:
             self.log.error("抓取服务无响应")
-            return 0, -1, "no response"
+            return "unknown", 0, -1, "no response"
         self.log.info("抓取服务返回: success={} stage={} [{}] {}".format(
             res.success, res.stage, STAGE_TEXT.get(res.stage, "未知"), res.message))
-        return res.success, res.stage, res.message
+        return verdict, res.success, res.stage, res.message
 
     # ══════════════ ⑤ 主流程 ══════════════
     def run(self, observation_pose=None, skip_nav=False, no_creep=False, park_override=None):
@@ -1244,14 +1494,18 @@ class GraspPhase:
                                         stand_dist=OBSERVATION_DIST)
             self.sleep(0.5)
 
-        tried = set()
-        for attempt in range(1, MAX_TARGET_TRIES + 1):
+        # ★ 放弃标记按【清单实例号】记：按 class_id 记会让同类物体互相连坐
+        #   （桌上摆两个 coke can 时，放弃第一个会把第二个一起排掉 ✗）
+        abandoned = set()
+        close_look_done = False
+        for _attempt in range(1, MAX_TARGET_TRIES + 1):
             targets = self.fetch_targets()
             self.last_targets = targets
             # ★ 一个都没返回时，也要试一次"近看"（实测踩过）：
             #   小物体（汤罐 66×101 mm）在观察位 1.15 m 处视觉完全认不出来 ✗，
             #   而原来的近看回退只在"有候选但都不合格"时才触发 → 直接结束 ✗
-            if not targets and not skip_nav and not tried:
+            if not targets and not skip_nav and not close_look_done:
+                close_look_done = True
                 self.log.warn("观察位没返回任何目标 → 靠近到近看位再试一次")
                 rp_c = self._robot_map_pose()
                 if rp_c is not None:
@@ -1266,9 +1520,15 @@ class GraspPhase:
                         targets = self.fetch_targets()
                         self.last_targets = targets
                         self.log.info("近看返回 {} 个目标".format(len(targets)))
-            if not targets:
+                        # ★ 近看位看得更清 → 重建一次清单（观察位漏检的物体补进来）
+                        self._rebuild_plan(targets)
+            if not targets and self._plan is None:
                 self.log.error("视觉没给出任何目标（观察位 + 近看位都没有）→ 结束抓取阶段（不会退真值 ✗）")
                 return False
+            if not targets:
+                # ★ 清单已经定下来了 → 即使这一步视觉全空也按清单继续，
+                #   位置退回初始快照（这正是"记住四个初始位置"的用处之一 ✓）
+                self.log.warn("这一步视觉没给出任何目标 → 按手里的清单继续（位置用初始快照）")
             self.log.info("候选目标 {} 个（来源 vision）：{}".format(
                 len(targets),
                 ["{}({:.2f})".format(t.class_id, t.confidence) for t in targets]))
@@ -1277,13 +1537,14 @@ class GraspPhase:
             if rp is None:
                 self.log.error("拿不到 map←base_footprint 变换，算不出站位")
                 return False
-            # 观察位【不查可达性】（离桌 1.15 m，查了会把所有候选拒光 ✗）
-            target, obstacles, reason = self.choose_target(targets, exclude=tried,
-                                                           check_reach=False, robot_pose=rp)
-            # ★ 观察位太远 → 置信度全线掉到阈值以下（实测 0.30~0.47）→ 再靠近看一次
-            if (target is None and not skip_nav and not tried
-                    and self.min_confidence > CLOSE_MIN_CONFIDENCE):
-                self.log.warn("观察位没有够格的候选（{}）→ 靠近到近看位重看一次".format(reason))
+            # ★ 建清单：观察位第一次拿到候选时定一次（顺序 + 初始位置快照）
+            if self._plan is None and targets:
+                od = self._robot_odom_pose() or rp
+                self._plan = self._build_plan(targets, rp, od)
+                self.log.info("抓取清单（按好抓程度排序）：{}".format(self._plan_text(self._plan)))
+            # ★ 清单仍为空（候选全被可夹性/支撑面过滤掉）→ 借近看位重建一次
+            if not self._plan and not skip_nav and not self._plan_rebuilt:
+                self.log.warn("观察位挑不出可夹物体 → 靠近到近看位重建清单")
                 n = self.approach_normal(TABLE_CENTER_XYZ[:2], rp[:2])
                 cx = TABLE_CENTER_XYZ[0] + n[0] * CLOSE_LOOK_DIST
                 cy = TABLE_CENTER_XYZ[1] + n[1] * CLOSE_LOOK_DIST
@@ -1293,24 +1554,39 @@ class GraspPhase:
                                             stand_dist=CLOSE_LOOK_DIST, timeout=15.0)
                     self.sleep(0.5)
                     rp = self._robot_map_pose() or rp
-                    prev = self.min_confidence
-                    self.min_confidence = CLOSE_MIN_CONFIDENCE
-                    try:
-                        targets = self.fetch_targets()
-                        self.last_targets = targets
-                        self.log.info("近看候选 {} 个：{}".format(
-                            len(targets),
-                            ["{}({:.2f})".format(t.class_id, t.confidence) for t in targets]))
-                        target, obstacles, reason = self.choose_target(
-                            targets, exclude=tried, check_reach=False, robot_pose=rp)
-                    finally:
-                        self.min_confidence = prev
+                    targets = self.fetch_targets()
+                    self.last_targets = targets
+                    self.log.info("近看候选 {} 个：{}".format(
+                        len(targets),
+                        ["{}({:.2f})".format(t.class_id, t.confidence) for t in targets]))
+                    self._rebuild_plan(targets, rp)
                 else:
                     self.log.warn("近看位不可达")
-            if target is None:
-                self.log.error("没有可夹的目标：{}".format(reason))
+            if not self._plan:
+                self.log.error("没有可夹的目标（候选为空或全被过滤）→ 结束抓取阶段")
                 return False
-            self.log.info("→ 选中 [{}]：{}".format(target.class_id, reason))
+            # ★ 从清单取下一个未放弃的物体：顺序开局就冻结好了，不再每轮重选 ✓
+            planned, pidx = self._next_planned(self._plan, abandoned)
+            if planned is None:
+                self.log.error("清单里的 {} 个目标都试过了 → 结束抓取阶段".format(len(self._plan)))
+                return False
+            target = self._pick_fresh(targets, planned, rp)
+            if target is not None:
+                obstacles = [t for t in targets if t is not target]
+                reason = "视觉 base({:+.3f},{:+.3f}) conf={:.2f}".format(
+                    target.point.x, target.point.y, target.confidence)
+            else:
+                # ★ 这一步视觉没认出它 → 退回清单里的初始位置（精度差，故明确告警）
+                #   清单坐标是 odom 系 ⇒ 换算回车体必须配 odom 位姿，配 rp(map) 会错 ✗
+                obstacles = list(targets)
+                rod = self._robot_odom_pose() or rp
+                target = self._mk_target(planned["class"], planned["conf"],
+                                         self._to_base(planned["xy"], rod))
+                reason = "清单初始位置 map({:.3f},{:.3f})".format(
+                    planned["xy"][0], planned["xy"][1])
+                self.log.warn("这一步没认出 {} → 退回清单初始位置".format(planned["class"]))
+            self.log.info("→ 选中 [{}]（清单 P{}）：{}".format(
+                target.class_id, pidx + 1, reason))
 
             cy, sy = math.cos(rp[2]), math.sin(rp[2])
             obj_map = (rp[0] + cy * target.point.x - sy * target.point.y,
@@ -1346,9 +1622,10 @@ class GraspPhase:
                 pose = self.standoff_pose(target, standoff, rp, normal)
                 if pose is None:
                     # None 有两个来源：拿不到位姿变换，或这一面外推 1.0 m 仍站不下人
-                    # （后者见 standoff_pose 的说明）——都判"这次尝试失败"，换目标再来
-                    tried.add(target.class_id)
-                    self.log.error("算不出可用站位（位姿变换缺失，或这一面站不下人）→ 换目标重试")
+                    # （后者见 standoff_pose 的说明）——都判"这个物体不再抓"，去下一个
+                    abandoned.add(pidx)
+                    self.log.error("算不出可用站位（位姿变换缺失，或这一面站不下人）"
+                                   "→ 判定 {} 不再抓，换下一个".format(target.class_id))
                     continue
                 px, py, pyaw, ox, oy = pose
             self.log.info("② 抓取站位 = ({:.3f}, {:.3f}, yaw={:.3f})；目标在 map({:.3f}, {:.3f})"
@@ -1362,7 +1639,7 @@ class GraspPhase:
             self.sleep(0.5)
             targets = self.fetch_targets()
             self.last_targets = targets
-            t2, obs2, _ = self.choose_target(targets, exclude=tried, check_reach=True,
+            t2, obs2, _ = self.choose_target(targets, exclude=(), check_reach=True,
                                              robot_pose=self._robot_map_pose())
             if t2 is not None and t2.class_id == target.class_id:
                 target, obstacles = t2, obs2
@@ -1384,12 +1661,56 @@ class GraspPhase:
                 best.header.stamp = now
                 for o in obs:
                     o.header.stamp = now
+                # ★★ 自检的参照值必须在 `_remember()` **之前**取 ——
+                #    `_remember()` 会把跟踪基准覆盖成 best 自己，取晚了就成了
+                #    "自己跟自己比"，校验恒成立 ✗（底盘此刻没动，所以这个值就是
+                #    微调收敛值，是独立于这张照片的另一次测量）
+                conv_xy = self.measure(target.class_id)
+                ok_point = False
+                for _try in range(CONSIST_TRIES + 1):
+                    why = self._target_suspect(best, conv_xy)
+                    if why is None:
+                        if _try:
+                            self.log.info("  ✓ 重拍 {} 次后自检通过".format(_try))
+                        ok_point = True
+                        break
+                    self.log.warn("  ✗ 抓取点自检不过（第 {} 次）：{}".format(_try + 1, why))
+                    if _try >= CONSIST_TRIES:
+                        break
+                    self.sleep(0.5)        # 只为区分"偶发"和"稳定"（重拍救不回来，见 CONSIST_TRIES 注释）
+                    b2, o2, _s2 = self._fresh_target(target.class_id)
+                    if b2 is None:
+                        break
+                    now_r = self.node.get_clock().now().to_msg()
+                    b2.header.stamp = now_r
+                    for o in o2:
+                        o.header.stamp = now_r
+                    best, obs = b2, o2
+                    self.log.info("  重拍: {} base({:+.3f},{:+.3f}) conf={:.2f}"
+                                  .format(best.class_id, best.point.x, best.point.y,
+                                          best.confidence))
+                if not ok_point:
+                    # ★ 2026-09-18：先**降级为告警，照抓**，理由有三 ——
+                    #   ① 拒抓等于这一轮颗粒无收，可"只求能成功抓准"要的是能抓上；
+                    #   ② 判断"点偏没偏"真正缺的那个数是【合爪位指尖的实际 y】，
+                    #      而它是在 call_grasp 里打的 —— 这里 return 掉就永远拿不到 ✗；
+                    #   ③ 三次空合都证明对罐子无害（合完罐子原地没动），
+                    #      而 sugar_box 那次被推翻是**另一个物性**（高瘦盒），不是这条路径。
+                    #   ⇒ 拿到足够数据、定出真正的闸门（现在看是"伸多远"）之后再决定要不要恢复。
+                    self.log.error("  ✗✗ 抓取点自检连续 {} 次不过 → 【仍照抓，仅告警】"
+                                   "（拒抓已降级；本轮的价值是拿到合爪位指尖 y 的实测）"
+                                   .format(CONSIST_TRIES + 1))
                 self._remember(target.class_id, best)      # 同时刷新里程计跟踪
                 bx, by = best.point.x, best.point.y
                 self.log.info("抓取点重测: {} base({:+.3f},{:+.3f}) conf={:.2f}（障碍 {} 个，来源 {}）"
                               .format(best.class_id, bx, by, best.confidence, len(obs), src))
                 # 残差偏大 → 按同一套相对控制定量补一次（纯里程计），再拍一张确认
-                if (abs(by) > 0.020 or abs(math.hypot(bx, by) - standoff) > 0.030):
+                # ★ 2026-09-18：门限从写死的 0.020 改成自检那个常量 CONSIST_TOL_Y(0.012)。
+                #   `_target_suspect` 的 docstring 早就指出"旧的安全网 abs(by)>0.020 差 1 mm
+                #   没触发"是空合的一环；今天又拿到两例：01:28 / 01:55 的视觉横向都是 −0.019，
+                #   刚好卡在 0.020 之下 ⇒ 补正根本没触发 ⇒ 19 mm 直接下爪 ⇒ 空合。
+                #   两个门限共用同一常量，以后不会再各走各的 ✓
+                if (abs(by) > CONSIST_TOL_Y or abs(math.hypot(bx, by) - standoff) > 0.030):
                     self.log.warn("  残差偏大（横向 {:+.3f} m / 距离 {:.3f} vs {:.3f}）→ 定量补一次"
                                   .format(by, math.hypot(bx, by), standoff))
                     self._nudge(target.class_id, standoff)
@@ -1401,11 +1722,65 @@ class GraspPhase:
                         best2.header.stamp = now2
                         for o in obs2:
                             o.header.stamp = now2
+                        # ★ 参照值同样要在 _remember 之前取（理由见上面 conv_xy 处）
+                        conv2 = self.measure(target.class_id)
                         self._remember(target.class_id, best2)
                         best, obs = best2, obs2
                         self.log.info("  补正后重测: {} base({:+.3f},{:+.3f}) conf={:.2f}"
                                       .format(best.class_id, best.point.x, best.point.y,
                                               best.confidence))
+                        # ★ 同一个自检也要过一遍：**这个值才是最终下爪用的那个**。
+                        #   参照换成"补正后"的里程计跟踪值（底盘刚动过，不能再用 conv_xy）
+                        #   —— 若横向对不上，说明这次补正没把它推到位。
+                        #   处理同上面：**只告警，照抓**（拒抓已降级，理由见上）
+                        why2 = self._target_suspect(best, conv2)
+                        if why2 is not None:
+                            self.log.error("  ✗✗ 补正后抓取点自检不过：{} → 【仍照抓，仅告警】"
+                                           .format(why2))
+                    else:
+                        # ★★ 2026-09-18 现场修：补正**已经真把底盘挪了** ⇒ 绝不能再拿补正前的
+                        #   旧点下爪。02:32 空合的直接原因就在这里：`_nudge` 把底盘横向挪了
+                        #   ~16 mm（跟踪值 −0.021→−0.005），重拍又失败，代码于是继续用补正前的
+                        #   (0.442,-0.021) —— 那是**旧车体系**里的点，在新车体系里偏 16 mm，
+                        #   超过 ±5 mm 捕获窗口 ⇒ 空合。（10:05 能夹住，唯一差别就是这次重拍
+                        #   成功了、拿到补正后的 −0.004。）
+                        #   重拍失败时的退路：**里程计跟踪值**（measure 的快路径，不调视觉）。
+                        #   它的锚点在上面刚被 `_remember` 设成那张照片的值，之后只走了很短
+                        #   一段相对运动 ⇒ 是"视觉锚点 + 小相对量"，这段的相对误差只有几 mm
+                        #   （实测对照：10:05 补正后 跟踪 0.000 vs 重拍 −0.004 ⇒ 差 4 mm）
+                        tr = self.measure(target.class_id)
+                        if tr is None:
+                            # ★ 快照兜底（顺序：里程计外推 → 清单初始位置）：里程计锚点也没了
+                            #   → 退回清单里的 map 初始位置。底盘此刻【已经动过】（_nudge 挪的）
+                            #   ⇒ 必须用【当前】map 位姿重新换算，绝不能用补正前的旧车体系点 ✗
+                            pxy = self._plan_xy(target.class_id)
+                            rp3 = self._robot_odom_pose()   # 清单是 odom 系 → 必须配 odom ✗
+                            if pxy is None or rp3 is None:
+                                self.log.error("  ✗✗ 补正后重拍失败、里程计跟踪也拿不到、清单里也没有"
+                                               "位置 → 判定 {} 不再抓（绝不拿补正前的旧点下爪）"
+                                               .format(target.class_id))
+                                abandoned.add(pidx)
+                                continue
+                            self.log.warn("  补正后重拍失败、里程计也拿不到 → 退回清单初始位置"
+                                          " map({:.3f},{:.3f})（精度差，可能碰物体）"
+                                          .format(pxy[0], pxy[1]))
+                            best = self._mk_target(target.class_id, target.confidence,
+                                                   self._to_base(pxy, rp3))
+                            best.header.stamp = self.node.get_clock().now().to_msg()
+                        else:
+                            dx, dy = float(tr[0]) - bx, float(tr[1]) - by  # 底盘位移在车体系里的表现
+                            best.point.x, best.point.y = float(tr[0]), float(tr[1])
+                            now3 = self.node.get_clock().now().to_msg()
+                            best.header.stamp = now3    # 底盘刚动过，时间戳必须刷新
+                            for o in obs:               # 障碍也是补正前量的 ⇒ 按同一位移一起搬
+                                o.point.x += dx
+                                o.point.y += dy
+                                o.header.stamp = now3
+                            self._remember(target.class_id, best)
+                            self.log.warn("  补正后重拍失败 → 改用里程计跟踪点 base({:+.3f},{:+.3f})"
+                                          "（相对补正前 {:+.0f}/{:+.0f} mm；无独立测量，故不跑自检）"
+                                          .format(best.point.x, best.point.y,
+                                                  dx * 1000.0, dy * 1000.0))
                 target, obstacles = best, obs
             else:
                 # 抓取点上认不出来 → 退回"观察位估计 + 里程计外推"，并明确告警
@@ -1417,23 +1792,80 @@ class GraspPhase:
                     return False
                 fm = getattr(self, "_final_map", None)
                 if fm is None:
-                    fm = {"class": target.class_id, "conf": target.confidence,
-                          "xy": self._to_map((target.point.x, target.point.y), rp2)}
+                    # ★ 快照兜底：连"观察位那次"的锚点都没有时，用清单里的初始位置 ✓
+                    pxy = self._plan_xy(target.class_id)
+                    if pxy is None:
+                        self.log.error("  ✗✗ 既没有测量锚点、清单里也没有 {} → 判定不再抓，换下一个"
+                                       .format(target.class_id))
+                        abandoned.add(pidx)
+                        continue
+                    self.log.warn("  退回清单初始位置 map({:.3f},{:.3f})".format(pxy[0], pxy[1]))
+                    fm = {"class": target.class_id, "conf": target.confidence, "xy": pxy}
                 target = self._mk_target(fm["class"], fm["conf"], self._to_base(fm["xy"], rp2))
                 obstacles = [self._mk_target(o["class"], o["conf"], self._to_base(o["xy"], rp2))
                              for o in getattr(self, "_final_obs", [])]
 
-            ok, stage, msg = self.call_grasp(target, obstacles)
-            if ok:
-                self.log.info("Phase 2 完成：抓取成功 ✓")
+            verdict, ok, stage, msg = self.call_grasp(target, obstacles)
+            # ★ 成败判据 = TF 两指间隙（不是 res.success ✗ —— MTC 空合也报 success=True，
+            #   实测 57mm 空合照样走 "if ok" 假报成功）。间隙采不到(unknown)才退回 res.success。
+            gripped = (verdict == "gripped") or (verdict == "unknown" and ok)
+            if gripped:
+                self.log.info("Phase 2 完成：抓取成功 ✓（TF 间隙判据={}）".format(verdict))
                 return True
-            if stage in (2, 5):          # BAD_TARGET / NO_SOLUTION → 换一个目标再试
-                tried.add(target.class_id)
-                self.log.warn("目标 {} 失败（stage={}），换下一个目标重试（已试 {}）"
-                              .format(target.class_id, STAGE_TEXT.get(stage, stage), tried))
+            # ★ 环境级故障（3 SCENE_FAILED / 4 INIT_FAILED）：换目标也是同样的错，
+            #   四个挨个撞一遍只是把同一份错误日志打四遍、白耗时间 → 直接结束 ✓
+            if stage in (3, 4):
+                self.log.error("抓取失败（stage={} [{}]，环境级故障）→ 结束抓取阶段"
+                               .format(stage, STAGE_TEXT.get(stage, "未知")))
+                return False
+            if stage == 0 and verdict in ("empty", "wide"):
+                # ★ 重新拍照识别重新抓：MTC 报告成功(stage=0)但两指没夹到（空合/没合到）。
+                #   纯原地重拍救不回来（视觉是确定性的，同一位置重拍返回逐位相同的结果 ✗），
+                #   所以先 _nudge 挪一点底盘换测量，再 _fresh_target 重拍重识别、重新下爪。
+                for _retry in range(1, SAME_TARGET_RETRY + 1):
+                    self.log.warn("两指没夹到（verdict={}）→ 第 {} 次重新拍照识别重新抓"
+                                  .format(verdict, _retry))
+                    self._nudge(target.class_id, standoff)
+                    self.sleep(0.5)
+                    best, obs, _s = self._fresh_target(target.class_id)
+                    if best is None:
+                        self.log.warn("重拍没认出 {} → 放弃重抓".format(target.class_id))
+                        break
+                    now = self.node.get_clock().now().to_msg()
+                    best.header.stamp = now
+                    for o in obs:
+                        o.header.stamp = now
+                    self._remember(target.class_id, best)
+                    target, obstacles = best, obs
+                    verdict, ok, stage, msg = self.call_grasp(target, obstacles)
+                    if verdict == "gripped" or (verdict == "unknown" and ok):
+                        self.log.info("Phase 2 完成：抓取成功 ✓（重抓第 {} 次，TF 间隙判据={}）"
+                                      .format(_retry, verdict))
+                        return True
+                    if stage in (3, 4):
+                        self.log.error("重抓第 {} 次遇到环境级故障（stage={} [{}]）→ 结束抓取阶段"
+                                       .format(_retry, stage, STAGE_TEXT.get(stage, "未知")))
+                        return False
+                    if stage != 0:
+                        self.log.warn("重抓第 {} 次失败（stage={} [{}]）→ 换目标".format(
+                            _retry, stage, STAGE_TEXT.get(stage, "未知")))
+                        break
+                    self.log.warn("重抓第 {} 次仍没夹到（verdict={} stage={}）".format(
+                        _retry, verdict, STAGE_TEXT.get(stage, stage)))
+                # ★ 重抓耗尽仍未成功 → 判定这个物体不再抓，去下一个 ✓
+                #   （原来这里直接 return False、整个 Phase 2 收场 —— 等于第一好抓的物体
+                #     一次没成就放弃全部，与"按好抓程度排序 + 依次尝试"的意图相反 ✗）
+                abandoned.add(pidx)
+                self.log.warn("{} 试满 {} 次重抓仍未成功（stage={} [{}]）→ 判定不再抓，换下一个"
+                              .format(target.class_id, SAME_TARGET_RETRY, stage,
+                                      STAGE_TEXT.get(stage, "未知")))
                 continue
-            self.log.error("抓取失败（stage={} [{}]）：不再重试".format(
-                stage, STAGE_TEXT.get(stage, "未知")))
-            return False
-        self.log.error("换目标重试 {:.0f} 次仍未成功 → 结束抓取阶段".format(MAX_TARGET_TRIES))
+            # ★ 目标相关类失败（1 NO_TARGET / 2 BAD_TARGET / 5 NO_SOLUTION / 6 EXEC_FAILED）
+            #   → 判定不再抓，换下一个物体
+            abandoned.add(pidx)
+            self.log.warn("目标 {} 失败（stage={} [{}]）→ 判定不再抓，换下一个"
+                          .format(target.class_id, stage, STAGE_TEXT.get(stage, "未知")))
+            continue
+        self.log.error("清单里的目标都试过仍未成功（共 {} 个）→ 结束抓取阶段"
+                       .format(MAX_TARGET_TRIES))
         return False

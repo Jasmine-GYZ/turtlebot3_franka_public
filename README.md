@@ -289,13 +289,21 @@ ros2 run turtlebot3_manipulation_navigation2 dining_grasp_task.py
 | `✗ 手指停在 X mm —— 比物体窄边 Y mm 还宽 → 没夹到物体（或夹到了别的东西）` | 两指之间是空的 ✗ ⇒ 问题在抓取点的**位置/高度**，不要再查别的 |
 | `? 手指合到 X mm，比物体窄边 Y mm 还小 → 物体被挤走 / 没在两指之间` | 合过头了，物体被推走 ✗ |
 
-另外两行是有用的旁证：
+另外三行是有用的旁证：
 
 - `合爪前两指真实间距 = X mm；指尖平面 base(x,y,z)` —— 合爪**前**的开口
+- `两指真实间距(TF): 起始 X mm → 最小 Y mm` —— 夹持过程中的**最小**开口；
+  它就是上面判据用的那个数，并附带一条自洽检查
+  `✓ 与 joint1+joint2 自洽`（TF 实测间隙 应 ≈ 两关节位移之和）
 - `指尖轨迹(本次调用): x a→b（最远 c） z d→e` —— **最远 x 应 ≈ 抓取点的 x** ✓
 
 > 判据需要物体的真实窄边（来自 `config/objects.yaml`），所以日志里会同时打出
 > `预期合爪: 物体窄边 Y m − 干涉 Z → 关节 Q（两指间距 R mm）` 作为参照。
+>
+> ⚠️ **判据用的是 TF 实测间隙，不是 `2×joint1`**（2026-09-18 改）。弃用 mimic 后
+> 两指独立驱动、**可以不对称** —— 实测一次成功抓取是 joint1=0.0285、joint2=0.0372
+> （和 = 0.0657 m ≈ 罐头窄边 0.0660 m），而 `2×0.0285` 只有 57.0 mm。
+> 旧版拿它去比 66.0 mm，于是**每次成功都误报** `? 物体被挤走` + `✗ 两指不对称` ✗
 
 ### 为抓取调整过的导航参数
 
@@ -313,20 +321,52 @@ ros2 run turtlebot3_manipulation_navigation2 dining_grasp_task.py
 > ⚠️ 即便是 `robot_radius`，它也**同时作用于 Phase 1 巡逻**（会贴障碍物更近）。
 > 动过之后巡逻阶段需要单独回归验证。
 
-### 已知问题：向前伸臂时车体前倾（未修）
+### 向前伸臂时车体前倾（✅ 2026-09-18 已修）
 
-底盘的支撑多边形只有 `[x=-0.177, x=0]` —— **两个万向轮都在后方**（`caster_back_left/right`，
-world 里 x=-0.177），驱动轮在 x=0，**前方没有任何支撑点**。而机械臂 19.6 kg、质心高 0.87 m
-（底盘才 1.55 kg），所以向前伸臂抓取时整车必然前倾：实测 **pitch 达 0.22 rad ≈ 12.6°**，
-导致末端偏离约 **7 cm**，抓不到物体。
+底盘的支撑多边形原本只有 `[x=-0.177, x=0]` —— **两个万向轮都在后方**
+（`caster_back_left/right`，world 里 x=-0.177），驱动轮在 x=0，**前方没有任何支撑点**。
+而机械臂 19.6 kg、质心高 0.87 m（底盘才 1.55 kg），所以向前伸臂时整车必然前倾。
 
-一个修法是**加前万向轮**（`caster_front_joint`，origin `xyz="0.18 0.0 -0.004"`），
-把支撑多边形前边界推到 +0.18 —— 但**当前未采纳，URDF 是原样**。
+**它与抓取的关系（这是 20 cm 级偏差的真根因）**：`base_footprint` 与底盘刚性固连，
+底盘一低头，**在 base 系里"正确"的预计算抓取点在世界里被抬高并前移**。
+视觉测量发生在 arm home（pitch≈0），而 MTC 执行发生在 arm 伸出（pitch 11.7°）——
+**测量位姿 ≠ 执行位姿**，所以视觉再准也没用。
 
-> 若要重新采纳，**必须同时在 `gazebo/turtlebot3_waffle_pi.gazebo.xacro` 里补一个
-> `<gazebo reference="caster_front_link">` 块**，把 `mu1`/`mu2` 设成 `0.1`
-> （照抄后万向轮那两个块）。否则它用 Gazebo 的默认摩擦（≈1.0），会变成一块
-> **高摩擦刹车垫**而不是万向轮 —— 不但不解决问题，还会在转向时跟车较劲。
+- 实测：命令 base(0.432, −0.125, 0.895)，pitch 11.55° 时执行 → TCP 落到世界 y=1.8038，
+  而罐子在 y=2.0000 → **误差 0.196 m，几乎全在前后方向**
+- **修法（已采纳）**：加前万向轮 `caster_front_joint`（origin `xyz="0.18 0.0 -0.004"
+  rpy="-1.57 0 0"`，几何与后轮完全一致以共用接地面），**并且**在
+  `gazebo/turtlebot3_waffle_pi.gazebo.xacro` 里加 `<gazebo reference="${prefix}caster_front_link">`
+  把 `mu1`/`mu2` 设成 `0.1`。**两者缺一不可** —— 漏掉 gazebo 块会用默认摩擦（≈1.0），
+  前轮变成**高摩擦刹车垫**而不是万向轮（9-16 那次失败就是这个原因）。
+- **验收（实测）**：pitch Δ **+11.70° → +0.30°**；TCP 水平误差 **0.196 m → 0.008 m**；
+  驱动无刹车（转 69.7°/平移 0.209 m，均 ≈理论值 70%，差值是一秒的 cmd_vel 启动延迟）；
+  底盘 z 仍 0.0000（与后轮同一接地面）。
+
+### 抓取点的自检（2026-09-18 加，防"照偏掉的点下爪")
+
+`grasp_phase.py` 在**发出抓取请求前**会对最终抓取点做一次自检（`_target_suspect`），
+不通过就重拍，再不过就**拒抓**。原因是一次实跑：手指合到 57.0 mm **空合**
+（TF 间隙 76→57 全程无阻挡，而罐子窄边 66 mm），抓空。
+
+**它问的问题**：底盘在「微调收敛」和「抓取点重拍」之间**没动过**，所以这两次对同一个
+静止物体的测量本该一致 —— 对不上就说明至少有一次是错的。
+
+| 闸门 | 阈值 | 说明 |
+|---|---|---|
+| 置信度 | `< 0.70` | 失败那次 0.53，成功那次 0.89 |
+| **横向差** | `> 0.012 m` | 两指**闭合方向**，严 —— 没有别的机制能补救它 |
+| 距离差 | `> 0.060 m` | 松（**必须大于 `_nudge` 的 0.030**）—— 距离差有 `_nudge` 专门去补，自检只在 nudge 也救不回时才拦 |
+
+> ⚠️ **必须分方向判，看总差异大小是判不出来的。** 两次实跑的实测：
+> 成功那次微调 (0.377,+0.000) vs 重拍 (0.402,+0.000) → 差 **25 mm**，但**全在前向**
+> （只是"多伸 2 cm"，罐子仍在两指之间 ✓）；
+> 失败那次 (0.407,−0.000) vs (0.412,−0.019) → 差 19.6 mm，其中**横向 19 mm**（合空 ✗）。
+> **成功那次的差异反而更大** —— 所以只能按方向判。
+>
+> 旧的安全网是 `abs(by) > 0.020`，那次横向偏 0.019 **差 1 mm 没触发**；另一路拿
+> `standoff`（预期距离）当参照，而那次站位被外推得更远、预期值从 0.370 漂到 0.400，
+> 于是距离那路也没触发。**新自检不依赖任何"预期值"。**
 
 ### 比赛答案 JSON（评分用）
 
@@ -352,7 +392,15 @@ pkill -9 -f 'ign gazebo'
 pkill -9 -f parameter_bridge
 pkill -9 -f ros_gz_bridge
 pkill -9 -f robot_state_publisher
-# 导航（逐个点名，别用宽泛的 nav2 —— 它会把路径里含该串的任务节点一起杀掉）
+# ★★ 导航：必须直接杀 component_container —— Nav2 的节点是 **compose 在一个
+#    `component_container_isolated` 进程里的**（amcl / controller_server /
+#    planner_server / bt_navigator / map_server / behavior_server /
+#    waypoint_follower / smoother_server 全都不是独立进程），
+#    它们的名字**根本不出现在任何 cmdline 里** → 下面按名字点名的那几行
+#    **一个也杀不掉** ✗（2026-09-18 实测：连开 4 轮仿真，攒了 4 个容器，
+#    节点图里出现 2~4 份同名 amcl/controller_server，AMCL 行为随即错乱）
+pkill -9 -f component_container
+# 下面这些是"万一没 compose / 留了独立进程"时的兜底；正常情况杀不到东西
 pkill -9 -f amcl
 pkill -9 -f bt_navigator
 pkill -9 -f controller_server
@@ -362,6 +410,8 @@ pkill -9 -f behavior_server
 pkill -9 -f waypoint_follower
 pkill -9 -f velocity_smoother
 pkill -9 -f map_server
+# cmd_vel 桥接（每一轮 launch 起一个，不点名会一路攒）
+pkill -9 -f cmd_vel_relay
 # 抓取（move_group / MTC 抓取节点）
 pkill -9 -f move_group
 pkill -9 -f grasp_node
@@ -376,6 +426,14 @@ pkill -9 -f dining_grasp_task
 > 残留检查：`nvidia-smi --query-compute-apps=pid,used_memory --format=csv` 应该**没有**
 > python 进程占显存。上面这套 `pkill` 如果漏了，patrol 进程会活着继续占 ~2.8 GiB，
 > 下一次启动的模型加载就可能 CUDA OOM（2026-09-16 就吃过这个亏）。
+>
+> 进程都清干净之后，还建议清一次 fastrtps 的共享内存残留：
+> `rm -f /dev/shm/fastrtps_*`（**确认没有 ROS 进程活着再清**）。不清的话每次启动
+> 都会刷一堆 `RTPS_TRANSPORT_SHM Error] Failed init_port fastrtps_port7413:
+> open_and_lock_file failed`（无害但淹没日志）。实测攒了 274 个文件 / 8.3 MB。
+>
+> 判"清干净了没有"最快的办法：`ros2 node list --no-daemon` 应该是**空的**
+> （`ros2 node list` 会读 daemon 的缓存，可能显示已经死掉的节点 ✗）。
 
 > 注意：`pkill -f` 用扩展正则，**模式里不要写 `\|`**（那会变成字面竖线，匹配不到）。
 > 需要多选就用真正的 `|`，或像上面一样逐个点名。

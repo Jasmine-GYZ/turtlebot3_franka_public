@@ -1,11 +1,10 @@
 <?xml version="1.0"?>
 <sdf version="1.8">
-  <world name="home">
+  <world name="robocup_home_official">
     <physics name="1ms" type="ignored">
       <max_step_size>0.001</max_step_size>
       <real_time_factor>1.0</real_time_factor>
     </physics>
-
     <plugin filename="ignition-gazebo-physics-system"
             name="gz::sim::systems::Physics"/>
     <plugin filename="ignition-gazebo-user-commands-system"
@@ -18,14 +17,14 @@
     </plugin>
     <gravity>0 0 -9.81</gravity>
     <scene>
-      <ambient>0.7 0.7 0.7 1</ambient>
+      <ambient>0.4 0.4 0.4 1</ambient>
       <background>0.92 0.92 0.92 1</background>
       <shadows>true</shadows>
     </scene>
     <light name="sun" type="directional">
       <cast_shadows>true</cast_shadows>
       <pose>0 0 8 0 0 0</pose>
-      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <diffuse>0.7 0.7 0.7 1</diffuse>
       <specular>0.2 0.2 0.2 1</specular>
       <direction>-0.4 0.2 -1</direction>
     </light>
@@ -65,8 +64,8 @@
         </visual>
       </link>
     </model>
-    <!-- 房间墙体（static）。位姿与尺寸保持原布局。 -->
-    <model name="Home">
+    <!-- RoboCup@Home 房间墙体（static）。位姿与尺寸保持原布局。 -->
+    <model name="RoboCup_Home">
       <static>true</static>
       <pose>0.0595 -0.023998 0 0 0 0</pose>
       <link name="Wall_10">
@@ -1266,36 +1265,20 @@
         </visual>
       </link>
     </model>
-    <!-- 地面上一个白色正方体小块 -->
-    <model name="white_block">
-      <static>true</static>
-      <pose>-2.7 -1.2 0.1 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>0.2 0.2 0.2</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>0.2 0.2 0.2</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>1 1 1 1</ambient>
-            <diffuse>1 1 1 1</diffuse>
-            <specular>0.1 0.1 0.1 1</specular>
-          </material>
-        </visual>
-      </link>
-    </model>
     <!--
       可抓/可动物体：通过 include 引用包内 model.sdf，避免与资源定义双份维护。
       name 仅为 Gazebo 仿真侧实例标识；机器人侧不会收到模型名或几何。
     -->
+    <include>
+      <uri>model://apple</uri>
+      <name>apple</name>
+      <pose>0.652391 -3.02886 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://apple</uri>
+      <name>apple_clone</name>
+      <pose>0.521706 -2.85381 0.78 0.002626 0.007625 0.00267</pose>
+    </include>
     <include>
       <uri>model://apple</uri>
       <name>apple_clone_0</name>
@@ -1307,86 +1290,90 @@
       <pose>-3.47568 -3.40265 0.78 -0.005582 0.006263 -0.003267</pose>
     </include>
     <include>
-      <uri>model://apple</uri>
-      <name>apple_clone_2</name>
-      <pose>0.63 -2.6 0.78 0 0 0</pose>
-    </include>
-    <include>
       <uri>model://coke_can</uri>
       <name>coke_can</name>
       <pose>-2.35337 -0.061656 0.78 0 0 0</pose>
     </include>
     <include>
-      <uri>model://banana</uri>
-      <name>banana</name>
-      <pose>-3.3 -2.1 0.78 0 0 0</pose>
-    </include>
-    <include>
       <uri>model://coke_can</uri>
-      <name>coke_can_1</name>
-      <pose>-3.5 -3.1 0.78 0 0 0</pose>
+      <name>coke_can_clone</name>
+      <pose>-3.52104 -3.58476 0.78 -0.01128 0.003765 0.077734</pose>
     </include>
-    <include>
-      <uri>model://bowl</uri>
-      <name>bowl_1</name>
-      <pose>-3.5 -2.8 0.78 0 0 0</pose>
-    </include>
-
-    <!-- ── 餐厅：拔高题（抓取）场景 —— 复刻规则书 2.3 ──────────────────
-         规则书 3.2：餐厅内设一张餐桌，桌上【并列放置四个物品】，
-                     摆放位置不固定、赛前由裁判确定。
-         规则书 3.3：机器人【从四个物品中任选一个】抓取（赛前不指定目标）。
-         餐桌 = dinning_table_3（世界 2.7 2 0，yaw 1.57），桌板 0.5 x 1.2 →
-           长边 1.2 m 沿【世界 x】，跨 x∈[2.1, 3.3]；桌面顶 z = 0.765 + 0.015 = 0.78。
-         四个物体沿长边一排，间距 0.25 m，居中于 x = 2.7，y = 2.0。
-
-         选型：3 个短力臂（易抓）+ 1 个最难（sugar_box，实测合爪会把它推翻 92°）。
-           · 验证 TARGET_TIERS 会优先挑圆柱（coke can / tomato_soup_can）
-           · sugar_box 作为干扰项放远端；若它真被选中并倾覆，说明降级逻辑失效
-           · coke_can / tomato_soup_can 在客厅各有一份，这里是 clone，互不影响
-             （检测 max_range = 2.0 m，且只在客厅观察点采样 → 餐厅物体不会被计数）
-
-         另外三张餐桌（_0 @1.5,1.5 / _1 @1.5,2.0 / _2 @2.7,1.5）已清空：
-           规则书要求"一张餐桌、四个物品"；且 _2 距 _3 仅 0.5 m，
-           其上的物体会被 choose_target 当成障碍物放进规划场景。
-
-         ⚠ 原先放在餐厅各桌的 14 个"闭集复核参考图"物体已移出。
-           参考图 PNG 已生成、不受影响；要恢复原摆法用 git 恢复本文件即可。
-    -->
     <include>
       <uri>model://coke_can</uri>
       <name>coke_can_clone_0</name>
-      <pose>2.325 2.0 0.78 0 0 0</pose>
+      <pose>-3.32141 -2.1472 0.78 -0.01128 0.003765 0.077734</pose>
     </include>
     <include>
-      <uri>model://tomato_soup_can</uri>
-      <name>tomato_soup_can_clone_0</name>
-      <pose>2.575 2.0 0.78 0 0 0</pose>
+      <uri>model://bleach_cleanser</uri>
+      <name>bleach_cleanser</name>
+      <pose>-3.07057 -2.15704 0.78 0 0 0</pose>
     </include>
     <include>
-      <uri>model://potted_meat_can</uri>
-      <name>potted_meat_can</name>
-      <pose>2.825 2.0 0.78 0 0 0</pose>
+      <uri>model://bleach_cleanser</uri>
+      <name>bleach_cleanser_0</name>
+      <pose>-1.83 -0.11 0.8 0 0 0</pose>
     </include>
     <include>
-      <uri>model://sugar_box</uri>
-      <name>sugar_box</name>
-      <pose>3.075 2.0 0.78 0 0 0</pose>
+      <uri>model://bowl</uri>
+      <name>bowl</name>
+      <pose>2.6716 2.015 0.78 0 0 0</pose>
     </include>
     <include>
-      <uri>model://tomato_soup_can</uri>
-      <name>tomato_soup_can</name>
-      <pose>-3.7 -2.1 0.78 0 0 0</pose>
-    </include>
-    <include>
-      <uri>model://tuna_fish_can</uri>
-      <name>tuna_fish_can</name>
-      <pose>-2.9 -2.1 0.78 0 0 0</pose>
+      <uri>model://coke_can</uri>
+      <name>coke_can_0</name>
+      <pose>3.14347 2.10831 0.78 0 0 0</pose>
     </include>
     <include>
       <uri>model://windex_bottle</uri>
       <name>windex_bottle</name>
-      <pose>0.63 -2.2 0.78 0 0 0</pose>
+      <pose>2.9 2.08 0.78 0 0 0</pose>
     </include>
+    <include>
+      <uri>model://banana</uri>
+      <name>banana</name>
+      <pose>2.3 2.06 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://banana</uri>
+      <name>banana_0</name>
+      <pose>-3.6 -2 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://bowl</uri>
+      <name>bowl_0</name>
+      <pose>0.64 -2.58 0.78 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://windex_bottle</uri>
+      <name>windex_bottle_0</name>
+      <pose>0.78 -2.3 0.78 0 0 0</pose>
+    </include>
+
+    <model name="white_block">
+      <static>true</static>
+      <pose>-0.07 1.99 0.10 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>1.0 1.0 1.0</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>1.0 1.0 1.0</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>1 1 1 1</ambient>
+            <diffuse>1 1 1 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
   </world>
 </sdf>

@@ -30,7 +30,7 @@ def generate_launch_description():
     wpr_share = get_package_share_directory("wpr_simulation_ros2")
 
     rviz = LaunchConfiguration("rviz", default="false")
-    world_file = os.path.join(wpr_share, "worlds", "example.world")
+    world_file = os.path.join(wpr_share, "worlds", "official-ros2.world")
 
     # ── 1. xacro → URDF ─────────────────────────────────────────
     xacro_path = os.path.join(pkg_share, "urdf",
@@ -125,11 +125,12 @@ def generate_launch_description():
                    *controller_args],
         output="screen",
     )
+    # 两指都由它驱动（GripperActionController 是单关节的，驱不了 fr3_finger_joint2）
     gripper = Node(
         package="controller_manager", executable="spawner",
         arguments=["gripper_controller",
                    "--controller-type",
-                   "position_controllers/GripperActionController",
+                   "joint_trajectory_controller/JointTrajectoryController",
                    *controller_args],
         output="screen",
     )

@@ -70,8 +70,17 @@ WAYPOINTS = [
     ("table_3", -4.95, -3.1, math.pi / 50),           # 面朝 +X（living_room_table_3）
     ("table_1", -3.3, -1.2, - math.pi / 2), # 面朝 -Y（living_room_table_1）
     ("table_0", -2.1, -1.2, math.pi*7 / 12),   # 面朝 +Y（living_room_table_0）
-    ("table_2", -0.48, -2.6, math.pi / 25),           # 面朝 +X（living_room_table_2）
+    # 面朝 +X（living_room_table_2）。2026-09-18 从 -0.48 往前挪 0.2m：这张桌上只有
+    # 苹果一个小目标（画面里才 ~45px、暗红贴桌沿、背景一大片灰墙），近 0.2m 后
+    # 苹果像素 +22%、视线越过近桌沿的余量也多一点（离桌沿仍有 ~0.66m，碰撞无虞）。
+    ("table_2", -0.28, -2.6, math.pi / 25),
 ]
+
+# 某个观察点【一个目标都没检出】时，往前挪这么远换个视角再扫一次（米）。
+# 只影响那一次的补扫（见 _on_arrived），不改站位本身：站位离桌沿都在 0.6m 以上，
+# 挪 0.15m 后仍在桌子的膨胀区之外，不会撞桌；万一补扫目标不可达，Nav2 失败即跳过，
+# 不影响原来那次扫描的结果。
+RESCAN_NUDGE = 0.15
 
 # 相机 RGB 话题：Gazebo 桥接把 /pi_camera/image 重映射成了 /camera/image_raw，
 # 所以实际订阅 /camera/image_raw。真机 / 其他相机请改成你的话题名。
@@ -86,8 +95,7 @@ MARKER_TOPIC = "/detected_items"
 ITEM_COLORS = {
     "apple": (1.0, 0.0, 0.0),      # 红
     "coke can": (0.0, 0.4, 1.0),   # 蓝
-    "bowl": (0.0, 1.0, 0.0),       # 绿
-    "banana": (1.0, 1.0, 0.0),     # 黄
+    "bleach cleanser": (0.0, 1.0, 0.0),  # 绿
 }
 
 # 同一物理物品的 /map 坐标去重阈值（米）。不同物品在同一桌上相距 ≥0.3m，
@@ -115,18 +123,16 @@ ANSWER_OUTPUT_DIR = os.environ.get(
     "ANSWER_OUTPUT_DIR", os.path.expanduser("~/turtlebot3_ws/submissions"))
 
 # 内部类别名 → 评分规范类别名的映射。评分要求类别名与裁判发布完全一致
-# （含大小写/下划线），而内部 GroundingDINO prompt 用空格 "coke can"，
-# 这里转成规范名 "coke_can"。
+# （含大小写/下划线），而内部 GroundingDINO prompt 用空格 "coke can" /
+# "bleach cleanser"，这里转成规范名 "coke_can" / "bleach_cleanser"。
 NAME_TO_JSON = {
     "apple": "apple",
     "coke can": "coke_can",
-    "bowl": "bowl",
-    "banana": "banana",
+    "bleach cleanser": "bleach_cleanser",
 }
 
-# 本轮需写入 answers 的目标类别（规范名）。example 测试只有 apple、coke_can；
-# 正式比赛的三个类别由裁判发布后改这里即可（并确保 NAME_TO_JSON 覆盖它们）。
-TARGET_CLASSES_JSON = ["apple", "coke_can"]
+# 本轮需写入 answers 的目标类别（规范名）。正式比赛三类：apple、coke_can、bleach_cleanser。
+TARGET_CLASSES_JSON = ["apple", "coke_can", "bleach_cleanser"]
 
 
 def yaw_to_quat(yaw):
@@ -161,6 +167,14 @@ class CompetitionTask(Node):
         # 相机图像订阅：只缓存最新一帧，到观察点后再取出来识别
         self._latest_frame = None
         self._frame_lock = threading.Lock()
+        # ★ 帧序号 + 图像时间戳：扫描时打一行"帧龄/亮度"，用来排除"帧陈旧/画面全黑"
+        #   这两种零检出的常见原因（以前完全看不出来）
+        self._frame_seq = 0
+        self._frame_stamp = None
+        # ★ 零检出补扫：观察点名 → 补扫用的位姿（比站位往前挪 RESCAN_NUDGE）；
+        #   _rescan_done 保证每个观察点最多补扫一次（不会来回死循环）
+        self._rescan_pose = {}
+        self._rescan_done = set()
         self.create_subscription(
             Image, CAMERA_IMAGE_TOPIC, self._on_image_cb, 10
         )
@@ -266,6 +280,9 @@ class CompetitionTask(Node):
             return
 
         name, x, y, yaw = WAYPOINTS[self.waypoint_idx]
+        # 补扫位（若有）覆盖站位：只影响这一次导航，WAYPOINTS 本身不动 ⇒ 下一轮
+        # 巡逻还是从原站位开始，补扫不会"越挪越远"。
+        x, y, yaw = self._rescan_pose.get(name, (x, y, yaw))
         self.get_logger().info(
             "[{}/{}] 导航至 {} ({:.2f}, {:.2f})".format(
                 self.waypoint_idx + 1, len(WAYPOINTS), name, x, y
@@ -320,9 +337,29 @@ class CompetitionTask(Node):
         result = future.result()
 
         if result.status == 4:  # SUCCEEDED
-            self.get_logger().info("  ✓ 已到达 {}".format(name))
+            at_rescan = name in self._rescan_pose
+            self.get_logger().info("  ✓ 已到达 {}{}".format(
+                name, "（补扫位）" if at_rescan else ""))
             # ── 到达后才做识别计数 ──
-            self._do_detection(name)
+            counted = self._do_detection(name)
+
+            # 一个目标都没检出 → 往前挪 RESCAN_NUDGE 换视角再扫一次。
+            # 每个观察点最多补扫一次（_rescan_done），且补扫本身再零检出也直接放过
+            # ⇒ 不会来回死循环。补扫失败（导航失败）走下面正常分支跳过，不影响计数。
+            if counted == 0 and not at_rescan and name not in self._rescan_done:
+                self._rescan_done.add(name)
+                x, y, yaw = WAYPOINTS[self.waypoint_idx][1:]
+                self._rescan_pose[name] = (
+                    x + RESCAN_NUDGE * math.cos(yaw),
+                    y + RESCAN_NUDGE * math.sin(yaw),
+                    yaw,
+                )
+                nx, ny, _ = self._rescan_pose[name]
+                self.get_logger().warn(
+                    "  ↻ {} 零检出 → 往前挪 {:.2f}m 换视角补扫一次 ({:.2f}, {:.2f})".format(
+                        name, RESCAN_NUDGE, nx, ny))
+                self._navigate_next()   # 不推进 waypoint_idx：补扫的还是这个点
+                return
         else:
             self.get_logger().warn(
                 "  ✗ {} 导航失败 (status={}), 跳过".format(name, result.status)
@@ -381,12 +418,18 @@ class CompetitionTask(Node):
         return self._pipeline
 
     def _on_image_cb(self, msg):
-        """相机图像回调：解码后缓存最新一帧 BGR。"""
+        """相机图像回调：解码后缓存最新一帧 BGR（并记下帧序号与图像时间戳）。"""
         bgr = self._imgmsg_to_bgr(msg)
         if bgr is None:
             return
+        # 图像时间戳为 0 表示相机没打时间戳，记 None（不能当"帧很老"来报警）。
+        st = msg.header.stamp
+        stamp = None if (st.sec == 0 and st.nanosec == 0) \
+            else st.sec + st.nanosec * 1e-9
         with self._frame_lock:
             self._latest_frame = bgr
+            self._frame_seq += 1
+            self._frame_stamp = stamp
 
     def _on_depth_cb(self, msg):
         """深度图回调：缓存最新一帧 float 米制深度。"""
@@ -589,6 +632,10 @@ class CompetitionTask(Node):
 
         流程：取最新相机帧 → 检测分割 → 计算每个实例掩码的像素中心
         → 结果存入 detection_results（含数量 + 每个目标中心点）。
+
+        返回值：本次**真正计入**的对数（= counted_detections 的长度）。
+        扫描压根没跑（模型没加载出来 / 没收到图像 / detect 抛异常）时返回 None
+        —— 与"跑了但一个都没检出（0）"区分开，调用方只对后者做补扫。
         """
         self.get_logger().info("  🔍 {} 扫描中...".format(table_name))
 
@@ -597,10 +644,12 @@ class CompetitionTask(Node):
                 "count": 0, "objects": [],
                 "error": getattr(self, "_pipeline_error", "model_load_failed"),
             }
-            return
+            return None
 
         with self._frame_lock:
             frame = self._latest_frame.copy() if self._latest_frame is not None else None
+            f_seq = self._frame_seq
+            f_stamp = self._frame_stamp
 
         if frame is None:
             self.get_logger().warn(
@@ -610,7 +659,19 @@ class CompetitionTask(Node):
             self.detection_results[table_name] = {
                 "count": 0, "objects": [], "reason": "no_image"
             }
-            return
+            return None
+
+        # ★ 帧健康度：零检出时靠这行区分"画面全黑/帧陈旧" 和 "画面正常但模型没认出来"。
+        #   帧龄 = 图像时间戳 与 当前时刻 之差（时间戳缺省则不打）。
+        gray = frame.mean(axis=2) if frame.ndim == 3 else frame
+        now_s = self.get_clock().now().nanoseconds * 1e-9
+        age_txt = ("n/a" if f_stamp is None
+                   else "{:.2f}s".format(now_s - f_stamp))
+        self.get_logger().info(
+            "  🖼 帧 {}x{} 亮度 {:.0f}±{:.0f} 帧龄 {} (seq={})".format(
+                frame.shape[1], frame.shape[0], float(gray.mean()),
+                float(gray.std()), age_txt, f_seq)
+        )
 
         try:
             detections = self._pipeline.detect(frame)
@@ -619,14 +680,55 @@ class CompetitionTask(Node):
             self.detection_results[table_name] = {
                 "count": 0, "objects": [], "error": str(exc)
             }
-            return
+            return None
+
+        # ★ 闭集复核是静默丢弃的（命中干扰类直接 continue，一行日志都不打），
+        #   不把"复核前有几个框、留下几个"打出来，零检出就分不清是 GDINO 没给框、
+        #   还是给了被复核丢掉（苹果历史上就被判成过罐头）。
+        review = getattr(self._pipeline, "last_review", None)
+        if isinstance(review, dict):
+            proposed = review.get("proposed") or []
+            self.get_logger().info(
+                "  🔍 闭集复核: 提出 {} 个 [{}] → 留下 {} 个 [{}]".format(
+                    len(proposed),
+                    ", ".join("{}={:.2f}".format(p["phrase"], p["score"])
+                              for p in proposed),
+                    review.get("kept"),
+                    ", ".join(review.get("kept_labels") or []),
+                )
+            )
+            # ★ 每框复核明细：GDINO 说的类别 vs 复核的 argmax + 第二名相似度。
+            #   「保留(模糊救回)」= 复核 argmax 是干扰类、但与目标类差得 < ε，按置信门保下目标类。
+            for d in (review.get("details") or []):
+                verdict = {"ok": "保留", "margin": "保留(模糊救回)",
+                           "drop": "丢弃"}.get(d.get("gate"),
+                                               "保留" if d.get("kept") else "丢弃")
+                self.get_logger().info(
+                    "      ↳ box{} GDINO={}({:.2f}) → 复核 argmax={} {:.4f} | "
+                    "top2={} {:.4f} | {}".format(
+                        d.get("box_idx"), d.get("phrase"), d.get("gscore", 0.0),
+                        d.get("argmax_label"), d.get("argmax_sim", 0.0),
+                        d.get("top2_label"), d.get("top2_sim", 0.0),
+                        verdict,
+                    )
+                )
+
+        if not detections:
+            self.get_logger().warn(
+                "  🔎 原始检测 0 个（GDINO + 复核 这一帧一个框都没留下）")
+        else:
+            self.get_logger().info("  🔎 原始检测 {} 个: {}".format(
+                len(detections),
+                "; ".join("{}({:.2f})@({:.0f},{:.0f})".format(
+                    d["phrase"], d["score"], d["center_px"][0], d["center_px"][1])
+                    for d in detections)))
 
         with self._depth_lock:
             depth = self._latest_depth.copy() if self._latest_depth is not None else None
 
         objects = []
         wp_counts = {name: 0 for name in vision_pipeline.ITEM_NAMES}
-        counted_detections = []   # 真正参与计数的原始检测（画标注图只用这些）
+        counted_detections = []   # 真正参与计数的原始检测（作为本函数的返回值）
         for d in detections:
             cx, cy = d["center_px"]
             name = vision_pipeline.classify_phrase(d["phrase"])
@@ -696,14 +798,24 @@ class CompetitionTask(Node):
                 "  ⚠ 深度图或相机内参不可用，已跳过 3D 定位（仅计数）。"
             )
 
-        if SAVE_DEBUG_IMAGE and counted_detections:
-            self._save_debug_image(table_name, frame, counted_detections)
+        # ★ 零检出也存图：以前是 `and counted_detections`，恰恰把唯一需要诊断的那一帧
+        #   （一个目标都没检出的）排除掉了 —— 事后只有"0 个目标"一句话，没法复盘。
+        if SAVE_DEBUG_IMAGE:
+            try:
+                self._save_debug_image(table_name, frame, detections)
+            except Exception as exc:
+                self.get_logger().warn(
+                    "  ⚠ 结果图保存异常（不影响计数）: {}".format(exc))
+
+        return len(counted_detections)
 
     def _save_debug_image(self, table_name, frame, detections):
         os.makedirs(DEBUG_IMAGE_DIR, exist_ok=True)
         path = os.path.join(DEBUG_IMAGE_DIR, "{}.jpg".format(table_name))
-        self._pipeline.save_annotated(path, frame, detections)
-        self.get_logger().info("  📷 结果图已保存: {}".format(path))
+        if self._pipeline.save_annotated(path, frame, detections):
+            self.get_logger().info("  📷 结果图已保存: {}".format(path))
+        else:
+            self.get_logger().warn("  ⚠ 结果图写盘失败: {}".format(path))
 
     # ── 完成 ───────────────────────────────────────────────────
 
